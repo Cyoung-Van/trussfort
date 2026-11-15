@@ -12,7 +12,11 @@
 
 ## 运行
 
-下载或克隆本仓库后，直接双击 `index.html`（不需要服务器，也不需要联网，也不用先构建：打包好的 `dist/game.js` 已经在仓库里）。
+**在线试玩：<https://cyoung-van.github.io/trussfort/>**（需要支持 WebGL 的桌面浏览器）
+
+也可以直接看一场 AI 设计的堡垒对战：[Gemini 4 Hydrogen 对 GPT-6 Astra，第 2 轮](https://cyoung-van.github.io/trussfort/?a=arena/2026-11-16-hydrogen-vs-astra/r2-hydrogen.json&b=arena/2026-11-16-hydrogen-vs-astra/r2-astra.json&autostart=1)。
+
+本地运行：下载或克隆本仓库后，直接双击 `index.html`（不需要服务器，也不需要联网，也不用先构建：打包好的 `dist/game.js` 已经在仓库里）。
 
 ## 操作
 
