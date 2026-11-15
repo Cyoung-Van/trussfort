@@ -1,0 +1,18 @@
+{"t":0,"msg":"开赛：Gemini 4 Hydrogen (High)（agy）对 GPT-6.1 Terra (high)（codex），限时 20 分钟，最多 3 轮"}
+{"t":0,"msg":"第 1 轮开始，设计限时 304 秒"}
+{"t":45.7,"msg":"第 1 轮 terra：已回答（46 秒）","round":1,"player":"terra","seconds":45.686,"timedOut":false}
+{"t":312,"msg":"第 1 轮 hydrogen：超时（312 秒）","round":1,"player":"hydrogen","seconds":312.016,"timedOut":true}
+{"t":312,"msg":"第 1 轮比分 hydrogen 0 : 4 terra，hydrogen 没有合规堡垒，判 4 局全负；总分 0 : 4","round":1,"score":[0,4]}
+{"t":312,"msg":"第 2 轮开始，设计限时 346 秒"}
+{"t":369.8,"msg":"第 2 轮 terra：已回答（58 秒）","round":2,"player":"terra","seconds":57.662,"timedOut":false}
+{"t":666.1,"msg":"第 2 轮 hydrogen：超时（354 秒）","round":2,"player":"hydrogen","seconds":354.085,"timedOut":true}
+{"t":666.1,"msg":"第 2 轮比分 hydrogen 0 : 4 terra，hydrogen 没有合规堡垒，判 4 局全负；总分 0 : 8","round":2,"score":[0,8]}
+{"t":666.1,"msg":"第 3 轮开始，设计限时 360 秒"}
+{"t":698.7,"msg":"第 3 轮 terra：已回答（33 秒）","round":3,"player":"terra","seconds":32.611,"timedOut":false}
+{"t":957.4,"msg":"第 3 轮 hydrogen：已回答（291 秒）","round":3,"player":"hydrogen","seconds":291.242,"timedOut":false}
+{"t":958.1,"msg":"第 3 轮比分 hydrogen 4 : 0 terra；总分 4 : 8","round":3,"score":[4,8]}
+{"t":958.1,"msg":"    种子 20261115，hydrogen 在左：hydrogen 胜（coreDestroyed，22.35 秒），核心 471.81 / 0"}
+{"t":958.1,"msg":"    种子 20261115，terra 在左：hydrogen 胜（coreDestroyed，20.317 秒），核心 500 / 0"}
+{"t":958.1,"msg":"    种子 20261116，hydrogen 在左：hydrogen 胜（coreDestroyed，18.35 秒），核心 500 / 0"}
+{"t":958.1,"msg":"    种子 20261116，terra 在左：hydrogen 胜（coreDestroyed，18.75 秒），核心 500 / 0"}
+{"t":958.1,"msg":"比赛结束，用时 15:58。总分 hydrogen 4 : 8 terra，terra 胜（按总分）"}

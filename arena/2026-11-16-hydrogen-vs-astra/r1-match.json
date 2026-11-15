@@ -1,0 +1,79 @@
+{
+  "round": 1,
+  "m": {
+    "winner": "B",
+    "aWins": 0,
+    "bWins": 4,
+    "draws": 0,
+    "games": [
+      {
+        "seed": 20261115,
+        "left": "A",
+        "winner": "B",
+        "reason": "coreDestroyed",
+        "fightSeconds": 14.583,
+        "coreHpA": 0,
+        "coreHpB": 500
+      },
+      {
+        "seed": 20261115,
+        "left": "B",
+        "winner": "B",
+        "reason": "coreDestroyed",
+        "fightSeconds": 12.383,
+        "coreHpA": 0,
+        "coreHpB": 500
+      },
+      {
+        "seed": 20261116,
+        "left": "A",
+        "winner": "B",
+        "reason": "coreDestroyed",
+        "fightSeconds": 12.783,
+        "coreHpA": 0,
+        "coreHpB": 500
+      },
+      {
+        "seed": 20261116,
+        "left": "B",
+        "winner": "B",
+        "reason": "coreDestroyed",
+        "fightSeconds": 13.367,
+        "coreHpA": 0,
+        "coreHpB": 500
+      }
+    ]
+  },
+  "why": "",
+  "subs": [
+    {
+      "player": "hydrogen",
+      "accepted": true,
+      "fixed": false,
+      "error": null,
+      "seconds": 329.916,
+      "timedOut": false
+    },
+    {
+      "player": "astra",
+      "accepted": true,
+      "fixed": false,
+      "error": null,
+      "seconds": 203.817,
+      "timedOut": false
+    }
+  ],
+  "cost": [
+    19967,
+    19798
+  ],
+  "cannons": [
+    3,
+    3
+  ],
+  "score": [
+    0,
+    4
+  ],
+  "endedAt": 330
+}

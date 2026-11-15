@@ -1,0 +1,26 @@
+{"t":0,"msg":"开赛：Gemini 4 Hydrogen (high)（agy）对 GPT 6 Astra (high)（codex），限时 30 分钟，最多 3 轮"}
+{"t":0,"msg":"第 1 轮开始，设计限时 480 秒"}
+{"t":203.8,"msg":"第 1 轮 astra：已回答（204 秒）","round":1,"player":"astra","seconds":203.817,"timedOut":false}
+{"t":329.9,"msg":"第 1 轮 hydrogen：已回答（330 秒）","round":1,"player":"hydrogen","seconds":329.916,"timedOut":false}
+{"t":330.4,"msg":"第 1 轮比分 hydrogen 0 : 4 astra；总分 0 : 4","round":1,"score":[0,4]}
+{"t":330.4,"msg":"    种子 20261115，hydrogen 在左：astra 胜（coreDestroyed，14.583 秒），核心 0 / 500"}
+{"t":330.4,"msg":"    种子 20261115，astra 在左：astra 胜（coreDestroyed，12.383 秒），核心 0 / 500"}
+{"t":330.4,"msg":"    种子 20261116，hydrogen 在左：astra 胜（coreDestroyed，12.783 秒），核心 0 / 500"}
+{"t":330.4,"msg":"    种子 20261116，astra 在左：astra 胜（coreDestroyed，13.367 秒），核心 0 / 500"}
+{"t":330.4,"msg":"第 2 轮开始，设计限时 480 秒"}
+{"t":473.3,"msg":"第 2 轮 astra：已回答（143 秒）","round":2,"player":"astra","seconds":142.519,"timedOut":false}
+{"t":684.4,"msg":"第 2 轮 hydrogen：已回答（354 秒）","round":2,"player":"hydrogen","seconds":353.868,"timedOut":false}
+{"t":685.2,"msg":"第 2 轮比分 hydrogen 3 : 1 astra；总分 3 : 5","round":2,"score":[3,5]}
+{"t":685.2,"msg":"    种子 20261115，hydrogen 在左：hydrogen 胜（coreDestroyed，31.9 秒），核心 492.881 / 0"}
+{"t":685.2,"msg":"    种子 20261115，astra 在左：astra 胜（coreDestroyed，51.9 秒），核心 0 / 102.606"}
+{"t":685.2,"msg":"    种子 20261116，hydrogen 在左：hydrogen 胜（coreDestroyed，35.9 秒），核心 500 / 0"}
+{"t":685.2,"msg":"    种子 20261116，astra 在左：hydrogen 胜（coreDestroyed，36.317 秒），核心 161.642 / 0"}
+{"t":685.2,"msg":"第 3 轮开始，设计限时 480 秒"}
+{"t":908.7,"msg":"第 3 轮 hydrogen：已回答（223 秒）","round":3,"player":"hydrogen","seconds":223.162,"timedOut":false}
+{"t":927.2,"msg":"第 3 轮 astra：已回答（241 秒）","round":3,"player":"astra","seconds":241.271,"timedOut":false}
+{"t":927.4,"msg":"第 3 轮比分 hydrogen 0 : 4 astra；总分 3 : 9","round":3,"score":[3,9]}
+{"t":927.4,"msg":"    种子 20261115，hydrogen 在左：astra 胜（coreSunk，4.883 秒），核心 0 / 500"}
+{"t":927.4,"msg":"    种子 20261115，astra 在左：astra 胜（coreSunk，14.633 秒），核心 0 / 500"}
+{"t":927.4,"msg":"    种子 20261116，hydrogen 在左：astra 胜（coreSunk，4.967 秒），核心 0 / 500"}
+{"t":927.4,"msg":"    种子 20261116，astra 在左：astra 胜（coreSunk，14.6 秒），核心 0 / 500"}
+{"t":927.4,"msg":"比赛结束，用时 15:27。总分 hydrogen 3 : 9 astra，astra 胜（按总分）"}

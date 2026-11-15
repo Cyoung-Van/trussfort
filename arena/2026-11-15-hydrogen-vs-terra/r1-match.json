@@ -1,0 +1,42 @@
+{
+  "round": 1,
+  "m": {
+    "winner": "B",
+    "aWins": 0,
+    "bWins": 4,
+    "draws": 0,
+    "games": []
+  },
+  "why": "hydrogen 没有合规堡垒，判 4 局全负",
+  "subs": [
+    {
+      "player": "hydrogen",
+      "accepted": false,
+      "fixed": false,
+      "error": "超时未提交",
+      "seconds": 312.016,
+      "timedOut": true
+    },
+    {
+      "player": "terra",
+      "accepted": true,
+      "fixed": false,
+      "error": null,
+      "seconds": 45.686,
+      "timedOut": false
+    }
+  ],
+  "cost": [
+    null,
+    19720
+  ],
+  "cannons": [
+    null,
+    3
+  ],
+  "score": [
+    0,
+    4
+  ],
+  "endedAt": 312
+}

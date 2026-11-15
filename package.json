@@ -1,0 +1,19 @@
+{
+  "name": "trussfort",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "桁垒 — 造桥式堡垒攻防小游戏",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "test": "node --test test/*.test.mjs",
+    "battle": "node test/battle.mjs"
+  },
+  "dependencies": {
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

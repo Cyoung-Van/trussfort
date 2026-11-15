@@ -1,0 +1,79 @@
+{
+  "round": 3,
+  "m": {
+    "winner": "A",
+    "aWins": 4,
+    "bWins": 0,
+    "draws": 0,
+    "games": [
+      {
+        "seed": 20261115,
+        "left": "A",
+        "winner": "A",
+        "reason": "coreDestroyed",
+        "fightSeconds": 22.35,
+        "coreHpA": 471.81,
+        "coreHpB": 0
+      },
+      {
+        "seed": 20261115,
+        "left": "B",
+        "winner": "A",
+        "reason": "coreDestroyed",
+        "fightSeconds": 20.317,
+        "coreHpA": 500,
+        "coreHpB": 0
+      },
+      {
+        "seed": 20261116,
+        "left": "A",
+        "winner": "A",
+        "reason": "coreDestroyed",
+        "fightSeconds": 18.35,
+        "coreHpA": 500,
+        "coreHpB": 0
+      },
+      {
+        "seed": 20261116,
+        "left": "B",
+        "winner": "A",
+        "reason": "coreDestroyed",
+        "fightSeconds": 18.75,
+        "coreHpA": 500,
+        "coreHpB": 0
+      }
+    ]
+  },
+  "why": "",
+  "subs": [
+    {
+      "player": "hydrogen",
+      "accepted": true,
+      "fixed": false,
+      "error": null,
+      "seconds": 291.242,
+      "timedOut": false
+    },
+    {
+      "player": "terra",
+      "accepted": true,
+      "fixed": false,
+      "error": null,
+      "seconds": 32.611,
+      "timedOut": false
+    }
+  ],
+  "cost": [
+    19804,
+    19720
+  ],
+  "cannons": [
+    3,
+    3
+  ],
+  "score": [
+    4,
+    8
+  ],
+  "endedAt": 958
+}
