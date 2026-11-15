@@ -8,13 +8,15 @@
 |---|---|
 | ![蓝图界面](docs/blueprint.jpg) | ![敌方堡垒坍塌](docs/collapse.jpg) |
 
-![战斗结算](docs/result.jpg)
+| 战斗结算 | 对战回放：AI 模型设计的堡垒互相对战，逐局可看 |
+|---|---|
+| ![战斗结算](docs/result.jpg) | ![对战回放列表](docs/replay.jpg) |
 
 ## 运行
 
 **在线试玩：<https://cyoung-van.github.io/trussfort/>**（需要支持 WebGL 的桌面浏览器）
 
-也可以直接看一场 AI 设计的堡垒对战：[Gemini 4 Hydrogen 对 GPT-6 Astra，第 2 轮](https://cyoung-van.github.io/trussfort/?a=arena/2026-11-16-hydrogen-vs-astra/r2-hydrogen.json&b=arena/2026-11-16-hydrogen-vs-astra/r2-astra.json&autostart=1)。
+也可以看 AI 模型设计的堡垒互相对战：打开[对战回放](https://cyoung-van.github.io/trussfort/?replay)选任意一局，或者直接看 [Gemini 4 Hydrogen 对 GPT-6 Astra 的第 2 轮第 1 局](https://cyoung-van.github.io/trussfort/?replay=2026-11-16-hydrogen-vs-astra&round=2&game=1)。
 
 本地运行：下载或克隆本仓库后，直接双击 `index.html`（不需要服务器，也不需要联网，也不用先构建：打包好的 `dist/game.js` 已经在仓库里）。
 
@@ -38,6 +40,8 @@
 | 滚轮；空格或中键拖动 | 缩放；平移 |
 | F | 全景 / 我方特写 |
 | Enter | 开战（超预算时不能开战） |
+
+右上角的「回放」打开对战回放列表：点任意一局观看，不会动你自己的蓝图。回放里按 N 看下一局，Esc 回到列表。回放要读取比赛记录文件，所以只在在线版或通过本地服务器打开时可用。
 
 「示例」按钮在两座示例堡垒之间轮换：起手堡垒（会输）和参考堡垒（预算内能打赢默认敌人的一种搭法）。
 
@@ -99,3 +103,8 @@ npm run battle     # 在终端里跑一场对战并打印时间线
 | `forts/` | 三座示例堡垒的 JSON |
 | `arena/referee.mjs` | 模型对抗赛的裁判脚本（调用 agy 和 codex，按轮次对战、反馈、计分） |
 | `arena/日期-选手/` | 每场比赛的记录：提示词、回答、每轮堡垒、比分 |
+| `arena/index.mjs` | 把各场比赛汇总成 `arena/index.json`，网页里的回放列表读的就是它 |
+
+## 许可证
+
+[MIT](LICENSE)。打包文件 `dist/game.js` 里包含 three.js（同为 MIT 许可）。

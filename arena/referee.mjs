@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { rules, loadFort, exportFort, formatFort, checkFort, duel, match } from '../src/ai/api.js';
 import { makeEnemyFort, makeStarterFort, makeReferenceFort } from '../src/sim/forts.js';
+import { buildIndex } from './index.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -297,6 +298,8 @@ async function main() {
     rounds: history, totalSeconds: Math.round(elapsed()), limitSeconds: MINUTES * 60, mock: MOCK,
   };
   save('result.json', JSON.stringify(result, null, 2));
+  // 记录放在 arena/ 下的正式比赛：更新回放列表用的清单
+  if (!MOCK && path.dirname(OUT) === HERE) { try { buildIndex(HERE); } catch (e) { log('更新 arena/index.json 失败：' + e.message); } }
   log(`比赛结束，用时 ${clock(elapsed())}。总分 ${A.id} ${A.score} : ${B.score} ${B.id}，${winner ? winner + ' 胜（按' + by + '）' : '平局'}`);
 }
 

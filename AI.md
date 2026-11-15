@@ -118,6 +118,8 @@ node tools/serve.mjs 5173
 
 双击 `index.html` 打开时，把 JSON 文件拖进窗口：拖到左半边载入为我方，右半边载入为敌方。
 
+`arena/` 里记录的比赛可以直接回放：访问 `…/?replay` 打开列表，或用 `…/?replay=2026-11-16-hydrogen-vs-astra&round=2&game=1` 直接看某一局（`replay` 是比赛目录名，轮和局都从 1 数）。回放用记录里的堡垒、种子和左右站位，不会改动我方蓝图。
+
 页面上还有一个脚本接口 `window.trussfort`：
 
 | 方法 | 作用 |
@@ -128,6 +130,8 @@ node tools/serve.mjs 5173
 | `resetEnemy()` | 恢复默认敌人 |
 | `start()`、`back()` | 开战、返回蓝图 |
 | `result()` | 当前这场的阶段、胜者、核心耐久和统计 |
+| `replay.open()` | 打开对战回放列表 |
+| `replay.play(比赛目录名, 轮, 局)` | 直接回放记录里的一局，返回 Promise，值为是否开始 |
 
 ## 在自己的程序里调用
 

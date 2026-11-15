@@ -39418,6 +39418,8 @@ void main() {
     back: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
     replay: svg('<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4v4.5H9"/>'),
     close: svg('<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>'),
+    arena: svg('<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 5.5H5a3 3 0 0 0 3.2 3.9M16 5.5h3a3 3 0 0 1-3.2 3.9"/><path d="M12 13v4M8.5 20h7M9.5 17h5"/>'),
+    chev: svg('<path d="M9 6l6 6-6 6"/>'),
     field: svg('<path d="M3 18h6l1.5-4h3L15 18h6"/><path d="M3 18V8M21 18V8"/>')
   };
   var SWATCH = {
@@ -39502,6 +39504,7 @@ void main() {
       this._pips = [[], []];
       this._helpOpen = false;
       this._reduced = reducedMotion();
+      this._spec = null;
       root.classList.add("hud");
       this.bp = el("div", "hud-layer layer-bp", root);
       this.bt = el("div", "hud-layer layer-bt", root);
@@ -39682,24 +39685,26 @@ void main() {
       const L = this.bt;
       const back = this._button(L, "panel back pe", () => this._call("back"), "\u8FD4\u56DE\u84DD\u56FE\uFF08Esc\uFF09");
       html("span", "back-ic", back, ICON.back);
-      el("span", "back-text", back, "\u8FD4\u56DE\u84DD\u56FE");
+      this.backBtn = back;
+      this.backText = el("span", "back-text", back, "\u8FD4\u56DE\u84DD\u56FE");
       keycap(back, "Esc");
       const duel = el("div", "panel duel pe", L);
       this.sides = [0, 1].map((s) => {
         const side = el("div", "duel-side " + (s === 0 ? "ds-player" : "ds-enemy"), duel);
         const head = el("div", "ds-head", side);
-        el("span", "ds-name", head, s === 0 ? "\u6211\u65B9" : "\u654C\u65B9");
+        const name = el("span", "ds-name", head, s === 0 ? "\u6211\u65B9" : "\u654C\u65B9");
         const hp = el("span", "ds-hp", head, "");
         const bar = el("div", "ds-bar", side);
         const ghost = el("div", "ds-ghost", bar);
         const fill = el("div", "ds-fill", bar);
         el("div", "ds-flash", bar);
         const pips = el("div", "ds-pips", side);
-        return { side, hp, bar, ghost, fill, pips };
+        return { side, name, hp, bar, ghost, fill, pips };
       });
       const mid = el("div", "duel-mid", duel);
       duel.insertBefore(mid, this.sides[1].side);
       this.timerEl = el("div", "timer", mid, clock(CFG.battleTime));
+      this.specCap = el("div", "panel spec-cap", L, "");
       this.banner = el("div", "banner", L, "\u5F00\u706B");
       const pill = el("div", "panel ctrl pe", L);
       this.pauseBtn = this._button(pill, "icon-btn pause", () => this._call("pause"), "\u6682\u505C / \u7EE7\u7EED\uFF08Space\uFF09");
@@ -39724,14 +39729,13 @@ void main() {
       keycap(this.replayBtn, "R");
       this.result = el("div", "result", L);
       const card = el("div", "panel result-card pe", this.result);
-      el("div", "rs-eyebrow", card, "\u6218\u6597\u7ED3\u675F");
+      this.rsEyebrow = el("div", "rs-eyebrow", card, "\u6218\u6597\u7ED3\u675F");
       this.rsTitle = el("div", "rs-title", card, "");
       this.rsReason = el("div", "rs-reason", card, "");
       const table = el("div", "rs-table", card);
       const hrow = el("div", "rs-row rs-head", table);
       el("span", "rs-k", hrow, "");
-      el("span", "rs-v rs-p", hrow, "\u6211\u65B9");
-      el("span", "rs-v rs-e", hrow, "\u654C\u65B9");
+      this.rsHead = [el("span", "rs-v rs-p", hrow, "\u6211\u65B9"), el("span", "rs-v rs-e", hrow, "\u654C\u65B9")];
       this.rsCells = {};
       for (const [k, name] of [["shots", "\u5F00\u706B"], ["hits", "\u547D\u4E2D"], ["beamsLost", "\u635F\u5931\u6746\u4EF6"], ["cannonsLost", "\u635F\u5931\u706B\u70AE"], ["core", "\u6838\u5FC3\u5269\u4F59"]]) {
         const row = el("div", "rs-row", table);
@@ -39742,14 +39746,50 @@ void main() {
       el("span", "rs-k", trow, "\u7528\u65F6");
       this.rsTime = el("span", "rs-v rs-span", trow, "");
       const btns = el("div", "rs-btns", card);
-      const b1 = this._button(btns, "rs-primary", () => this._call("back"), "\u8FD4\u56DE\u84DD\u56FE\u4FEE\u6539\uFF08Esc\uFF09");
-      html("span", "back-ic", b1, ICON.back);
-      el("span", "", b1, "\u8FD4\u56DE\u84DD\u56FE\u4FEE\u6539");
-      keycap(b1, "Esc", "kc-go");
-      const b2 = this._button(btns, "rs-second", () => this._call("replay"), "\u91CD\u64AD\uFF08R\uFF09");
-      html("span", "rp-ic", b2, ICON.replay);
-      el("span", "", b2, "\u91CD\u64AD");
-      keycap(b2, "R");
+      this.rsB1 = this._button(btns, "rs-primary", () => this._call(this._rsActs[0]), "");
+      this.rsB2 = this._button(btns, "rs-second", () => this._call(this._rsActs[1]), "");
+      this._rsActs = ["back", "replay"];
+      this._setResultButtons();
+    }
+    _setResultButtons() {
+      const sp = this._spec;
+      const defs = {
+        edit: ["back", ICON.back, "\u8FD4\u56DE\u84DD\u56FE\u4FEE\u6539", "Esc"],
+        list: ["back", ICON.back, "\u8FD4\u56DE\u5217\u8868", "Esc"],
+        next: ["next", ICON.play, "\u4E0B\u4E00\u5C40", "N"],
+        replay: ["replay", ICON.replay, "\u91CD\u64AD", "R"]
+      };
+      const pick = !sp ? ["edit", "replay"] : sp.hasNext ? ["next", "list"] : ["list", "replay"];
+      [this.rsB1, this.rsB2].forEach((b, i) => {
+        const [act, icon, text, key] = defs[pick[i]];
+        this._rsActs[i] = act;
+        b.textContent = "";
+        html("span", "rs-ic", b, icon);
+        el("span", "", b, text);
+        keycap(b, key, i === 0 ? "kc-go" : "");
+        b.setAttribute("aria-label", `${text}\uFF08${key}\uFF09`);
+        b.title = `${text}\uFF08${key}\uFF09`;
+      });
+    }
+    /**
+     * 观战回放：对决条和结算卡显示双方选手名，返回键回到回放列表。传 null 恢复成「我方 / 敌方」。
+     * @param {{ names: [string, string], caption: string, hasNext: boolean } | null} spec
+     */
+    setSpectate(spec) {
+      this._spec = spec || null;
+      const names = spec ? spec.names : ["\u6211\u65B9", "\u654C\u65B9"];
+      for (let s = 0; s < 2; s++) {
+        this.sides[s].name.textContent = names[s];
+        this.rsHead[s].textContent = names[s];
+      }
+      this.root.classList.toggle("spectate", !!spec);
+      const back = spec ? "\u8FD4\u56DE\u5217\u8868" : "\u8FD4\u56DE\u84DD\u56FE";
+      this.backText.textContent = back;
+      this.backBtn.setAttribute("aria-label", `${back}\uFF08Esc\uFF09`);
+      this.backBtn.title = `${back}\uFF08Esc\uFF09`;
+      this.specCap.textContent = spec ? `\u56DE\u653E \xB7 ${spec.caption}` : "";
+      this.rsEyebrow.textContent = spec ? spec.caption : "\u6218\u6597\u7ED3\u675F";
+      this._setResultButtons();
     }
     _stressGradient() {
       const c = [0, 0, 0];
@@ -39763,6 +39803,9 @@ void main() {
     _buildShared() {
       const L = this.shared;
       const box = el("div", "topright pe", L);
+      this.arenaBtn = this._button(box, "panel icon-btn arena-btn bp-only", () => this._call("arena"), "\u5BF9\u6218\u56DE\u653E\uFF1A\u770B AI \u6A21\u578B\u8BBE\u8BA1\u7684\u5821\u5792\u5BF9\u6218");
+      html("span", "arena-ic", this.arenaBtn, ICON.arena);
+      el("span", "arena-text", this.arenaBtn, "\u56DE\u653E");
       this.focusBtn = this._button(box, "panel seg", () => this._call("focus"), "\u5168\u666F / \u7279\u5199\uFF08F\uFF09");
       this.focusOpts = { field: el("span", "seg-opt on", this.focusBtn, "\u5168\u666F"), build: el("span", "seg-opt", this.focusBtn, "\u7279\u5199") };
       keycap(this.focusBtn, "F");
@@ -40058,11 +40101,12 @@ void main() {
           break;
       }
     }
-    showResult({ winner, reason, time = 0, stats = null, playerHp = 0, enemyHp = 0, hpMax = 0 } = {}) {
-      const title = winner === "player" ? "\u80DC\u5229" : winner === "enemy" ? "\u5931\u8D25" : "\u5E73\u5C40";
+    showResult({ winner, reason, time = 0, stats = null, playerHp = 0, enemyHp = 0, hpMax = 0, note = "" } = {}) {
+      const names = this._spec ? this._spec.names : null;
+      const title = names ? winner === "player" ? `${names[0]} \u80DC` : winner === "enemy" ? `${names[1]} \u80DC` : "\u5E73\u5C40" : winner === "player" ? "\u80DC\u5229" : winner === "enemy" ? "\u5931\u8D25" : "\u5E73\u5C40";
       this.rsTitle.textContent = title;
-      this.rsTitle.className = "rs-title " + (winner === "player" ? "win" : winner === "enemy" ? "lose" : "draw");
-      this.rsReason.textContent = reasonText(winner, reason);
+      this.rsTitle.className = "rs-title " + (winner === "player" ? "win" : winner === "enemy" ? "lose" : "draw") + (names ? " named" : "");
+      this.rsReason.textContent = reasonText(winner, reason, names) + (note ? `\uFF08${note}\uFF09` : "");
       const st = stats || [{}, {}];
       for (const k of ["shots", "hits", "beamsLost", "cannonsLost"]) {
         for (let s = 0; s < 2; s++) this.rsCells[k][s].textContent = String(st[s] && st[s][k] || 0);
@@ -40077,14 +40121,15 @@ void main() {
       this.result.classList.remove("on");
     }
   };
-  function reasonText(winner, reason) {
+  function reasonText(winner, reason, names) {
     const both = winner !== "player" && winner !== "enemy";
+    const loser = names ? `${winner === "player" ? names[1] : names[0]} \u7684` : winner === "player" ? "\u654C\u65B9" : "\u6211\u65B9";
     switch (reason) {
       // 平局时两个核心的失去方式可能不同（一毁一沉），所以用中性的说法
       case "coreDestroyed":
-        return both ? "\u53CC\u65B9\u6838\u5FC3\u540C\u65F6\u5931\u5B88" : winner === "player" ? "\u654C\u65B9\u6838\u5FC3\u88AB\u51FB\u6BC1" : "\u6211\u65B9\u6838\u5FC3\u88AB\u51FB\u6BC1";
+        return both ? "\u53CC\u65B9\u6838\u5FC3\u540C\u65F6\u5931\u5B88" : `${loser}\u6838\u5FC3\u88AB\u51FB\u6BC1`;
       case "coreSunk":
-        return both ? "\u53CC\u65B9\u6838\u5FC3\u540C\u65F6\u5931\u5B88" : winner === "player" ? "\u654C\u65B9\u6838\u5FC3\u5760\u5165\u6C34\u4E2D" : "\u6211\u65B9\u6838\u5FC3\u5760\u5165\u6C34\u4E2D";
+        return both ? "\u53CC\u65B9\u6838\u5FC3\u540C\u65F6\u5931\u5B88" : `${loser}\u6838\u5FC3\u5760\u5165\u6C34\u4E2D`;
       case "timeout":
         return "\u65F6\u95F4\u5230\uFF0C\u6309\u6838\u5FC3\u5269\u4F59\u8010\u4E45\u5224\u5B9A";
       case "stalemate":
@@ -40093,6 +40138,130 @@ void main() {
         return "";
     }
   }
+
+  // src/ui/arena.js
+  var REASON = { coreDestroyed: "\u6838\u5FC3\u88AB\u6BC1", coreSunk: "\u6838\u5FC3\u843D\u6C34", timeout: "\u5230\u65F6\u5224\u5B9A", stalemate: "\u53CC\u65B9\u5931\u53BB\u706B\u529B" };
+  var shortName = (p) => p && p.id ? p.id.charAt(0).toUpperCase() + p.id.slice(1) : "?";
+  function el2(tag, cls, parent, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  var ArenaPanel = class {
+    /**
+     * @param {{ root: HTMLElement, onPlay: (match: object, roundIndex: number, gameIndex: number) => void, onDismiss?: () => void }} o
+     *   onDismiss：用户自己关掉面板（点 ×、点空白、按 Esc）时调用，用来作废还在路上的回放请求
+     */
+    constructor({ root, onPlay, onDismiss }) {
+      this.onPlay = onPlay;
+      this.onDismiss = onDismiss;
+      this.isOpen = false;
+      this._index = null;
+      this._rendered = false;
+      this.box = el2("div", "arena pe", root);
+      this.box.addEventListener("pointerdown", (e) => {
+        if (e.target === this.box) this.dismiss();
+      });
+      const card = el2("div", "panel arena-card", this.box);
+      const head = el2("div", "ar-head", card);
+      const ht = el2("div", "", head);
+      el2("div", "ar-title", ht, "\u5BF9\u6218\u56DE\u653E");
+      el2("div", "ar-sub", ht, "AI \u6A21\u578B\u5404\u81EA\u8BBE\u8BA1\u4E00\u5EA7\u5821\u5792\uFF0C\u5F15\u64CE\u81EA\u52A8\u5BF9\u6218\u3002\u70B9\u4EFB\u610F\u4E00\u5C40\u89C2\u770B\u3002");
+      const x = el2("button", "btn icon-btn sm", head);
+      x.type = "button";
+      x.tabIndex = -1;
+      x.title = "\u5173\u95ED\uFF08Esc\uFF09";
+      x.setAttribute("aria-label", "\u5173\u95ED");
+      x.innerHTML = ICON.close;
+      x.addEventListener("click", () => this.dismiss());
+      this.body = el2("div", "ar-body", card);
+    }
+    /** 读取比赛清单（只读一次）。双击打开（file://）时浏览器不让读文件，会被拒绝。 */
+    load() {
+      if (!this._index) {
+        this._index = /^https?:$/.test(location.protocol) ? fetch("arena/index.json").then((r) => {
+          if (!r.ok) throw new Error(`\u8BFB\u4E0D\u5230\u6BD4\u8D5B\u6E05\u5355\uFF08${r.status}\uFF09`);
+          return r.json();
+        }) : Promise.reject(new Error("file"));
+        this._index.catch(() => {
+          this._index = null;
+        });
+      }
+      return this._index;
+    }
+    open() {
+      this.isOpen = true;
+      this.box.classList.add("on");
+      if (this._rendered) return;
+      this.body.textContent = "";
+      el2("div", "ar-msg", this.body, "\u6B63\u5728\u8BFB\u53D6\u6BD4\u8D5B\u8BB0\u5F55\u2026");
+      this.load().then((idx) => this._render(idx), (e) => {
+        this.body.textContent = "";
+        const m = el2("div", "ar-msg", this.body);
+        if (e && e.message === "file") {
+          m.append("\u53CC\u51FB\u6253\u5F00\u65F6\u6D4F\u89C8\u5668\u4E0D\u5141\u8BB8\u8BFB\u53D6\u6BD4\u8D5B\u8BB0\u5F55\u3002", el2("br"), "\u8BF7\u6253\u5F00\u5728\u7EBF\u7248\uFF0C\u6216\u5728\u9879\u76EE\u76EE\u5F55\u8FD0\u884C node tools/serve.mjs 5173 \u540E\u8BBF\u95EE localhost:5173\u3002");
+        } else m.textContent = `\u8BFB\u53D6\u5931\u8D25\uFF1A${e && e.message ? e.message : e}`;
+      });
+    }
+    close() {
+      this.isOpen = false;
+      this.box.classList.remove("on");
+    }
+    /** 用户主动关掉面板 */
+    dismiss() {
+      this.close();
+      if (this.onDismiss) this.onDismiss();
+    }
+    _render(idx) {
+      this.body.textContent = "";
+      const matches = idx && idx.matches || [];
+      if (!matches.length) {
+        el2("div", "ar-msg", this.body, "\u8FD8\u6CA1\u6709\u6BD4\u8D5B\u8BB0\u5F55\u3002");
+        return;
+      }
+      matches.forEach((m, mi) => {
+        const names = m.players.map(shortName);
+        const d = el2("details", "ar-match", this.body);
+        if (mi === 0) d.open = true;
+        const s = el2("summary", "", d);
+        el2("span", "ar-date", s, m.date);
+        const vs = el2("span", "ar-vs", s);
+        el2("span", m.winner === 0 ? "won" : "lost", vs, names[0]);
+        el2("span", "ar-score", vs, `${m.score[0]} : ${m.score[1]}`);
+        el2("span", m.winner === 1 ? "won" : "lost", vs, names[1]);
+        const chev = el2("span", "ar-chev", s);
+        chev.innerHTML = ICON.chev;
+        el2("span", "ar-models", s, `${m.players[0].label} \u5BF9 ${m.players[1].label}`);
+        m.rounds.forEach((r, ri) => {
+          const box = el2("div", "ar-round", d);
+          const rh = el2("div", "ar-rhead", box);
+          el2("span", "", rh, `\u7B2C ${r.round} \u8F6E${r.round === 1 ? " \xB7 \u76F2\u8BBE\u8BA1" : ""}`);
+          el2("span", "ar-rscore", rh, `${r.score[0]} : ${r.score[1]}`);
+          if (r.note) el2("div", "ar-note", box, r.note);
+          r.games.forEach((g, gi) => {
+            const b = el2("button", "btn ar-game", box);
+            b.type = "button";
+            b.tabIndex = -1;
+            el2("span", "ar-gno", b, `\u7B2C ${gi + 1} \u5C40`);
+            const sides = el2("span", "ar-sides", b);
+            el2("span", "l", sides, names[g.left]);
+            el2("span", "x", sides, " \u5BF9 ");
+            el2("span", "r", sides, names[1 - g.left]);
+            const who = g.winner == null ? "\u5E73\u5C40" : `${names[g.winner]} \u80DC`;
+            el2("span", "ar-res", b, `${who} \xB7 ${REASON[g.reason] || g.reason} \xB7 ${g.seconds} \u79D2`);
+            const pl = el2("span", "ar-play", b);
+            pl.innerHTML = ICON.play;
+            b.addEventListener("click", () => {
+              if (this.onPlay) this.onPlay(m, ri, gi);
+            });
+          });
+        });
+      });
+      this._rendered = true;
+    }
+  };
 
   // src/ai/api.js
   var DEG7 = Math.PI / 180;
@@ -40292,6 +40461,8 @@ ${rows(desc.cannons)}
       this.focus = "field";
       this.resultTimer = -1;
       this.report = null;
+      this.spectate = null;
+      this._replayGen = 0;
       this._bpView = null;
       this._last = performance.now();
       this.audio = new GameAudio();
@@ -40314,7 +40485,16 @@ ${rows(desc.cannons)}
           mute: () => this.toggleMute(),
           stress: () => this.toggleStress(),
           focus: () => this.toggleFocus(),
-          report: () => this._clearReport()
+          report: () => this._clearReport(),
+          arena: () => this.openArena(),
+          next: () => this.playNext()
+        }
+      });
+      this.arena = new ArenaPanel({
+        root: this.uiRoot,
+        onPlay: (m, ri, gi) => this.playRecorded(m, ri, gi),
+        onDismiss: () => {
+          this._replayGen++;
         }
       });
       this.world = new World({ canvas: this.glCanvas, view: this.view });
@@ -40531,6 +40711,12 @@ ${rows(desc.cannons)}
         resetEnemy: () => this.resetEnemy(),
         start: () => this.startBattle(),
         back: () => this.backToBlueprint(),
+        /** 对战回放：open() 打开列表；play(比赛目录名, 第几轮, 第几局) 直接看一局，返回 Promise<是否开始> */
+        replay: {
+          open: () => this.openArena(),
+          index: () => this.arena.load(),
+          play: (id, round = 1, game = 1) => this._playById(id, round, game)
+        },
         /** 当前这场的结果；还没打完时 winner 为 null */
         result: () => {
           const s = this.sim;
@@ -40540,6 +40726,13 @@ ${rows(desc.cannons)}
         }
       };
       const q = new URLSearchParams(location.search);
+      if (q.has("replay")) {
+        const id = q.get("replay");
+        if (id) this._playById(id, Number(q.get("round")) || 1, Number(q.get("game")) || 1).then((ok) => {
+          if (!ok) this.openArena();
+        });
+        else this.openArena();
+      }
       const a = q.get("a"), b = q.get("b");
       if (a || b) {
         if (!/^https?:$/.test(location.protocol)) {
@@ -40557,6 +40750,23 @@ ${rows(desc.cannons)}
           }).catch((e) => this.hud.toast(`\u8BFB\u53D6\u5821\u5792\u5931\u8D25\uFF1A${e.message}`, "error"));
         }
       }
+    }
+    /** 按「比赛目录名 + 第几轮 + 第几局」（都从 1 数）找到记录并播放 */
+    _playById(id, roundNo, gameNo) {
+      const gen = this._replayGen;
+      return this.arena.load().then((idx) => {
+        if (gen !== this._replayGen) return false;
+        const m = idx.matches.find((x) => x.id === id);
+        const ri = m ? m.rounds.findIndex((r) => r.round === roundNo) : -1;
+        if (ri < 0 || !m.rounds[ri].games[gameNo - 1]) {
+          this.hud.toast("\u6CA1\u6709\u627E\u5230\u8FD9\u4E00\u5C40\u7684\u8BB0\u5F55", "error");
+          return false;
+        }
+        return this.playRecorded(m, ri, gameNo - 1);
+      }, (e) => {
+        this.hud.toast(e && e.message === "file" ? "\u56DE\u653E\u9700\u8981\u901A\u8FC7\u7F51\u5740\u6253\u5F00\uFF08\u5728\u7EBF\u7248\u6216\u672C\u5730\u670D\u52A1\u5668\uFF09" : `\u8BFB\u53D6\u6BD4\u8D5B\u6E05\u5355\u5931\u8D25\uFF1A${e.message}`, "error");
+        return false;
+      });
     }
     _clearReport() {
       this.report = null;
@@ -40578,8 +40788,10 @@ ${rows(desc.cannons)}
     /** @returns {boolean} 是否真的开战了 */
     startBattle(isReplay = false) {
       if (this.state !== "blueprint") return false;
+      this._replayGen++;
       this.editor.cancel();
-      const cost = this.player.cost();
+      const spec = this.spectate;
+      const cost = spec ? 0 : this.player.cost();
       if (cost > CFG.budget) {
         this.hud.toast(`\u8D85\u51FA\u9884\u7B97 $${(cost - CFG.budget).toLocaleString()}\uFF0C\u5148\u62C6\u6389\u4E00\u4E9B\u518D\u5F00\u6218`, "error");
         this.audio.ui("error");
@@ -40587,7 +40799,7 @@ ${rows(desc.cannons)}
       }
       this.audio.unlock();
       this.editor.setEnabled(false);
-      this.sim = new Sim(this.player, this.enemy, { seed: CFG.seed ?? 20261115 });
+      this.sim = spec ? new Sim(spec.a, spec.b, { seed: spec.seed }) : new Sim(this.player, this.enemy, { seed: CFG.seed ?? 20261115 });
       this.acc = 0;
       this.paused = false;
       this.resultTimer = -1;
@@ -40612,19 +40824,27 @@ ${rows(desc.cannons)}
     }
     backToBlueprint() {
       if (this.state !== "battle" && this.state !== "toBattle") return;
-      this.report = this._makeReport();
+      this._replayGen++;
+      const spec = this.spectate;
+      if (!spec) this.report = this._makeReport();
       this.state = "toBlueprint";
       this.tr = 1 - unsmooth(this.blend);
       this.hud.hideResult();
       this.hud.setMode("blueprint");
-      this.editor.setBattleReport(this.report);
-      this.hud.setReport(this.report && this.report.broken.size ? { count: this.report.broken.size } : null);
+      if (!spec) {
+        this.editor.setBattleReport(this.report);
+        this.hud.setReport(this.report && this.report.broken.size ? { count: this.report.broken.size } : null);
+      }
       this.focus = this._bpFocus || "field";
       this.hud.setFocus(this.focus);
       const back = this._bpView || this.view.fitTarget(this.focus === "field" ? FIELD_BOUNDS : BUILD_BOUNDS, padFor("blueprint", this.view.w));
       this.view.animateTo(back, T_OUT);
       this.audio.ui("back");
       this.audio.stopBattle();
+      if (spec) {
+        this.arena.open();
+        return;
+      }
       if (this.report && this.report.winner === "enemy" && this.report.broken.size) {
         let seen = false;
         try {
@@ -40634,6 +40854,87 @@ ${rows(desc.cannons)}
         }
         if (!seen) this.hud.toast("\u7F16\u53F7\u662F\u6746\u4EF6\u5931\u5B88\u7684\u5148\u540E\uFF0C1 \u53F7\u6700\u5148\u3002\u60F3\u770B\u4E00\u79CD\u80FD\u8D62\u7684\u642D\u6CD5\uFF0C\u70B9\u300C\u793A\u4F8B\u300D", "info");
       }
+    }
+    // ------------------------------------------------------------ 对战回放（看 arena/ 里记录的比赛）
+    openArena() {
+      if (this.state !== "blueprint" && this.state !== "toBlueprint") return;
+      this.editor.cancel();
+      this.arena.open();
+    }
+    /** 这一局之后还有没有下一局（同一场比赛里按轮次、局数顺序）；有就返回 [轮下标, 局下标] */
+    _nextGame(match, ri, gi) {
+      if (gi + 1 < match.rounds[ri].games.length) return [ri, gi + 1];
+      for (let r = ri + 1; r < match.rounds.length; r++) if (match.rounds[r].games.length) return [r, 0];
+      return null;
+    }
+    playNext() {
+      const sp = this.spectate;
+      const nx = sp && this._nextGame(sp.match, sp.ri, sp.gi);
+      if (nx) this.playRecorded(sp.match, nx[0], nx[1]);
+    }
+    /**
+     * 观看记录里的一局：载入双方当轮的堡垒，用记录的种子和左右站位开战。
+     * 不经过编辑器，玩家自己的蓝图和存档都不受影响。可以从蓝图界面开始，也可以在实景里直接切到另一局。
+     * @returns {Promise<boolean>} 是否开始了
+     */
+    async playRecorded(match, ri, gi) {
+      const round = match && match.rounds[ri], g = round && round.games[gi];
+      if (!g) return false;
+      if (this.state === "toBlueprint") this._finishBack();
+      const from = this.state;
+      if (from !== "blueprint" && !(from === "battle" && this.spectate)) return false;
+      const gen = ++this._replayGen;
+      const fromSim = this.sim;
+      try {
+        const get = (f) => fetch(`arena/${match.id}/${f}`).then((r) => {
+          if (!r.ok) throw new Error(`${f}\uFF08${r.status}\uFF09`);
+          return r.json();
+        });
+        const [fl, fr] = await Promise.all([get(round.forts[g.left]), get(round.forts[1 - g.left])]);
+        if (gen !== this._replayGen || this.state !== from || this.sim !== fromSim) return false;
+        const a = loadFort(fl, "player"), b = loadFort(fr, "enemy");
+        const names = [shortName(match.players[g.left]), shortName(match.players[1 - g.left])];
+        const caption = `\u7B2C ${round.round} \u8F6E \xB7 \u7B2C ${gi + 1} \u5C40`;
+        const record = { winner: g.winner == null ? null : g.winner === g.left ? "player" : "enemy", seconds: g.seconds };
+        const inBattle = from === "battle";
+        if (inBattle) {
+          this._teardownBattle();
+          this.state = "blueprint";
+        }
+        this.spectate = { a, b, seed: g.seed, names, caption, record, match, ri, gi };
+        this.hud.setSpectate({ names, caption, hasNext: !!this._nextGame(match, ri, gi) });
+        this.arena.close();
+        if (!this.startBattle(inBattle)) {
+          this._endSpectate();
+          if (inBattle) {
+            this.blend = 0;
+            this.hud.setMode("blueprint");
+            this.editor.setEnabled(true);
+          }
+          return false;
+        }
+        if (inBattle) {
+          this.state = "battle";
+          this.blend = 1;
+          this.tr = 1;
+        }
+        return true;
+      } catch (e) {
+        if (gen === this._replayGen) this.hud.toast(`\u8BFB\u53D6\u56DE\u653E\u5931\u8D25\uFF1A${e && e.message ? e.message : e}`, "error");
+        return false;
+      }
+    }
+    _endSpectate() {
+      this.spectate = null;
+      this.hud.setSpectate(null);
+    }
+    /** 退回蓝图的过渡结束（或被提前收尾）：丢掉这场模拟，交还编辑器 */
+    _finishBack() {
+      this.state = "blueprint";
+      this.blend = 0;
+      this._teardownBattle();
+      this.editor.setEnabled(true);
+      if (this.spectate) this._endSpectate();
     }
     /** 同一张蓝图再打一遍（结果可复现，相当于回放） */
     replay() {
@@ -40723,12 +41024,7 @@ ${rows(desc.cannons)}
       } else if (this.state === "toBlueprint") {
         this.tr += dt / T_OUT;
         this.blend = 1 - smooth3(this.tr);
-        if (this.tr >= 1) {
-          this.state = "blueprint";
-          this.blend = 0;
-          this._teardownBattle();
-          this.editor.setEnabled(true);
-        }
+        if (this.tr >= 1) this._finishBack();
       }
       const sim = this.sim;
       if (sim) {
@@ -40755,6 +41051,9 @@ ${rows(desc.cannons)}
             if (this.state === "battle") {
               this.resultTimer = -1;
               const hp = (c) => c.alive ? Math.max(0, c.hp) : 0;
+              const rec = this.spectate && this.spectate.record;
+              const off = rec && (rec.winner !== (sim.winner === "player" || sim.winner === "enemy" ? sim.winner : null) || Math.abs(rec.seconds - sim.fightTime) > 0.11);
+              const recWho = off ? rec.winner === "player" ? this.spectate.names[0] + " \u80DC" : rec.winner === "enemy" ? this.spectate.names[1] + " \u80DC" : "\u5E73\u5C40" : "";
               this.hud.showResult({
                 winner: sim.winner,
                 reason: sim.endReason,
@@ -40762,9 +41061,10 @@ ${rows(desc.cannons)}
                 stats: sim.stats,
                 playerHp: hp(sim.cores[0]),
                 enemyHp: hp(sim.cores[1]),
-                hpMax: sim.cores[0].hpMax
+                hpMax: sim.cores[0].hpMax,
+                note: off ? `\u8FD9\u4E2A\u6D4F\u89C8\u5668\u7B97\u51FA\u7684\u7ED3\u679C\u548C\u6BD4\u8D5B\u8BB0\u5F55\u4E0D\u540C\uFF0C\u8BB0\u5F55\u662F ${recWho}\u3001${rec.seconds} \u79D2` : ""
               });
-              this.audio.ui(sim.winner === "player" ? "win" : sim.winner === "enemy" ? "lose" : "draw");
+              this.audio.ui(this.spectate || sim.winner === "player" ? "win" : sim.winner === "enemy" ? "lose" : "draw");
             } else {
               this.resultTimer = 1e-6;
             }
@@ -40772,11 +41072,12 @@ ${rows(desc.cannons)}
         }
       }
       this.world.setBlend(this.blend);
-      if (this.blend > 1e-3) {
+      const hideBp = !!this.spectate;
+      if (this.blend > 1e-3 || hideBp) {
         this.world.update(dt, now3 / 1e3);
         this.world.render();
       }
-      const bpAlpha = 1 - smooth3((this.blend - 0.08) / 0.6);
+      const bpAlpha = hideBp ? 0 : 1 - smooth3((this.blend - 0.08) / 0.6);
       this.bpCanvas.style.opacity = bpAlpha.toFixed(3);
       this.bpCanvas.style.visibility = bpAlpha > 1e-3 ? "visible" : "hidden";
       if (bpAlpha > 1e-3) this.editor.draw(dt);
@@ -40825,6 +41126,13 @@ ${rows(desc.cannons)}
         const repeatOk = e.code === "BracketLeft" || e.code === "BracketRight" || e.code === "KeyZ" || e.code === "KeyY";
         if (e.repeat && !repeatOk) return;
         const mod = e.metaKey || e.ctrlKey;
+        if (this.arena.isOpen) {
+          if (e.code === "Escape") {
+            e.preventDefault();
+            this.arena.dismiss();
+          }
+          return;
+        }
         if (this.state === "blueprint") {
           if (mod && e.code === "KeyZ") {
             e.preventDefault();
@@ -40875,6 +41183,10 @@ ${rows(desc.cannons)}
           }
           if (e.code === "KeyR") {
             this.replay();
+            return;
+          }
+          if (e.code === "KeyN" && this.spectate) {
+            this.playNext();
             return;
           }
           if (e.code === "KeyT") {

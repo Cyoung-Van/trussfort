@@ -74,6 +74,7 @@ export class Hud {
     this._pips = [[], []];
     this._helpOpen = false;
     this._reduced = reducedMotion();
+    this._spec = null;      // 观战回放时的显示信息：{ names:[左,右], caption, hasNext }
 
     root.classList.add('hud');
     this.bp = el('div', 'hud-layer layer-bp', root);
@@ -254,7 +255,8 @@ export class Hud {
     // 左上：返回蓝图
     const back = this._button(L, 'panel back pe', () => this._call('back'), '返回蓝图（Esc）');
     html('span', 'back-ic', back, ICON.back);
-    el('span', 'back-text', back, '返回蓝图');
+    this.backBtn = back;
+    this.backText = el('span', 'back-text', back, '返回蓝图');
     keycap(back, 'Esc');
 
     // 上中：对决条
@@ -262,19 +264,21 @@ export class Hud {
     this.sides = [0, 1].map((s) => {
       const side = el('div', 'duel-side ' + (s === 0 ? 'ds-player' : 'ds-enemy'), duel);
       const head = el('div', 'ds-head', side);
-      el('span', 'ds-name', head, s === 0 ? '我方' : '敌方');
+      const name = el('span', 'ds-name', head, s === 0 ? '我方' : '敌方');
       const hp = el('span', 'ds-hp', head, '');
       const bar = el('div', 'ds-bar', side);
       const ghost = el('div', 'ds-ghost', bar);
       const fill = el('div', 'ds-fill', bar);
       el('div', 'ds-flash', bar);
       const pips = el('div', 'ds-pips', side);
-      return { side, hp, bar, ghost, fill, pips };
+      return { side, name, hp, bar, ghost, fill, pips };
     });
     const mid = el('div', 'duel-mid', duel);
     // DOM 顺序：我方 / 中间 / 敌方
     duel.insertBefore(mid, this.sides[1].side);
     this.timerEl = el('div', 'timer', mid, clock(CFG.battleTime));
+    // 观战回放时的场次说明（对决条下方）
+    this.specCap = el('div', 'panel spec-cap', L, '');
 
     // 开火横幅
     this.banner = el('div', 'banner', L, '开火');
@@ -305,14 +309,13 @@ export class Hud {
     // 结算卡
     this.result = el('div', 'result', L);
     const card = el('div', 'panel result-card pe', this.result);
-    el('div', 'rs-eyebrow', card, '战斗结束');
+    this.rsEyebrow = el('div', 'rs-eyebrow', card, '战斗结束');
     this.rsTitle = el('div', 'rs-title', card, '');
     this.rsReason = el('div', 'rs-reason', card, '');
     const table = el('div', 'rs-table', card);
     const hrow = el('div', 'rs-row rs-head', table);
     el('span', 'rs-k', hrow, '');
-    el('span', 'rs-v rs-p', hrow, '我方');
-    el('span', 'rs-v rs-e', hrow, '敌方');
+    this.rsHead = [el('span', 'rs-v rs-p', hrow, '我方'), el('span', 'rs-v rs-e', hrow, '敌方')];
     this.rsCells = {};
     for (const [k, name] of [['shots', '开火'], ['hits', '命中'], ['beamsLost', '损失杆件'], ['cannonsLost', '损失火炮'], ['core', '核心剩余']]) {
       const row = el('div', 'rs-row', table);
@@ -323,14 +326,48 @@ export class Hud {
     el('span', 'rs-k', trow, '用时');
     this.rsTime = el('span', 'rs-v rs-span', trow, '');
     const btns = el('div', 'rs-btns', card);
-    const b1 = this._button(btns, 'rs-primary', () => this._call('back'), '返回蓝图修改（Esc）');
-    html('span', 'back-ic', b1, ICON.back);
-    el('span', '', b1, '返回蓝图修改');
-    keycap(b1, 'Esc', 'kc-go');
-    const b2 = this._button(btns, 'rs-second', () => this._call('replay'), '重播（R）');
-    html('span', 'rp-ic', b2, ICON.replay);
-    el('span', '', b2, '重播');
-    keycap(b2, 'R');
+    // 两个按钮的内容随场合变：自己打完是「返回蓝图修改 / 重播」，观战回放是「下一局 / 返回列表」
+    this.rsB1 = this._button(btns, 'rs-primary', () => this._call(this._rsActs[0]), '');
+    this.rsB2 = this._button(btns, 'rs-second', () => this._call(this._rsActs[1]), '');
+    this._rsActs = ['back', 'replay'];
+    this._setResultButtons();
+  }
+
+  _setResultButtons() {
+    const sp = this._spec;
+    const defs = {
+      edit: ['back', ICON.back, '返回蓝图修改', 'Esc'],
+      list: ['back', ICON.back, '返回列表', 'Esc'],
+      next: ['next', ICON.play, '下一局', 'N'],
+      replay: ['replay', ICON.replay, '重播', 'R'],
+    };
+    const pick = !sp ? ['edit', 'replay'] : sp.hasNext ? ['next', 'list'] : ['list', 'replay'];
+    [this.rsB1, this.rsB2].forEach((b, i) => {
+      const [act, icon, text, key] = defs[pick[i]];
+      this._rsActs[i] = act;
+      b.textContent = '';
+      html('span', 'rs-ic', b, icon);
+      el('span', '', b, text);
+      keycap(b, key, i === 0 ? 'kc-go' : '');
+      b.setAttribute('aria-label', `${text}（${key}）`); b.title = `${text}（${key}）`;
+    });
+  }
+
+  /**
+   * 观战回放：对决条和结算卡显示双方选手名，返回键回到回放列表。传 null 恢复成「我方 / 敌方」。
+   * @param {{ names: [string, string], caption: string, hasNext: boolean } | null} spec
+   */
+  setSpectate(spec) {
+    this._spec = spec || null;
+    const names = spec ? spec.names : ['我方', '敌方'];
+    for (let s = 0; s < 2; s++) { this.sides[s].name.textContent = names[s]; this.rsHead[s].textContent = names[s]; }
+    this.root.classList.toggle('spectate', !!spec);
+    const back = spec ? '返回列表' : '返回蓝图';
+    this.backText.textContent = back;
+    this.backBtn.setAttribute('aria-label', `${back}（Esc）`); this.backBtn.title = `${back}（Esc）`;
+    this.specCap.textContent = spec ? `回放 · ${spec.caption}` : '';
+    this.rsEyebrow.textContent = spec ? spec.caption : '战斗结束';
+    this._setResultButtons();
   }
 
   _stressGradient() {
@@ -346,6 +383,10 @@ export class Hud {
   _buildShared() {
     const L = this.shared;
     const box = el('div', 'topright pe', L);
+    // 对战回放（只在蓝图模式）
+    this.arenaBtn = this._button(box, 'panel icon-btn arena-btn bp-only', () => this._call('arena'), '对战回放：看 AI 模型设计的堡垒对战');
+    html('span', 'arena-ic', this.arenaBtn, ICON.arena);
+    el('span', 'arena-text', this.arenaBtn, '回放');
     // 全景 / 特写
     this.focusBtn = this._button(box, 'panel seg', () => this._call('focus'), '全景 / 特写（F）');
     this.focusOpts = { field: el('span', 'seg-opt on', this.focusBtn, '全景'), build: el('span', 'seg-opt', this.focusBtn, '特写') };
@@ -637,11 +678,15 @@ export class Hud {
     }
   }
 
-  showResult({ winner, reason, time = 0, stats = null, playerHp = 0, enemyHp = 0, hpMax = 0 } = {}) {
-    const title = winner === 'player' ? '胜利' : winner === 'enemy' ? '失败' : '平局';
+  showResult({ winner, reason, time = 0, stats = null, playerHp = 0, enemyHp = 0, hpMax = 0, note = '' } = {}) {
+    const names = this._spec ? this._spec.names : null;
+    const title = names
+      ? (winner === 'player' ? `${names[0]} 胜` : winner === 'enemy' ? `${names[1]} 胜` : '平局')
+      : (winner === 'player' ? '胜利' : winner === 'enemy' ? '失败' : '平局');
     this.rsTitle.textContent = title;
-    this.rsTitle.className = 'rs-title ' + (winner === 'player' ? 'win' : winner === 'enemy' ? 'lose' : 'draw');
-    this.rsReason.textContent = reasonText(winner, reason);
+    // 观战时颜色跟着获胜一方所在的那一边（左蓝右橙）
+    this.rsTitle.className = 'rs-title ' + (winner === 'player' ? 'win' : winner === 'enemy' ? 'lose' : 'draw') + (names ? ' named' : '');
+    this.rsReason.textContent = reasonText(winner, reason, names) + (note ? `（${note}）` : '');
     const st = stats || [{}, {}];
     for (const k of ['shots', 'hits', 'beamsLost', 'cannonsLost']) {
       for (let s = 0; s < 2; s++) this.rsCells[k][s].textContent = String((st[s] && st[s][k]) || 0);
@@ -656,12 +701,14 @@ export class Hud {
   hideResult() { this.result.classList.remove('on'); }
 }
 
-function reasonText(winner, reason) {
+function reasonText(winner, reason, names) {
   const both = winner !== 'player' && winner !== 'enemy';
+  // 失去核心的一方：自己打是「我方 / 敌方」，观战是选手名
+  const loser = names ? `${winner === 'player' ? names[1] : names[0]} 的` : winner === 'player' ? '敌方' : '我方';
   switch (reason) {
     // 平局时两个核心的失去方式可能不同（一毁一沉），所以用中性的说法
-    case 'coreDestroyed': return both ? '双方核心同时失守' : winner === 'player' ? '敌方核心被击毁' : '我方核心被击毁';
-    case 'coreSunk': return both ? '双方核心同时失守' : winner === 'player' ? '敌方核心坠入水中' : '我方核心坠入水中';
+    case 'coreDestroyed': return both ? '双方核心同时失守' : `${loser}核心被击毁`;
+    case 'coreSunk': return both ? '双方核心同时失守' : `${loser}核心坠入水中`;
     case 'timeout': return '时间到，按核心剩余耐久判定';
     case 'stalemate': return '双方都已失去火力，按核心剩余耐久判定';
     default: return '';

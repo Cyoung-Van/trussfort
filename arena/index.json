@@ -1,0 +1,311 @@
+{
+ "version": 1,
+ "matches": [
+  {
+   "id": "2026-11-16-hydrogen-vs-astra",
+   "date": "2026-11-16",
+   "players": [
+    {
+     "id": "hydrogen",
+     "label": "Gemini 4 Hydrogen (high)",
+     "via": "agy"
+    },
+    {
+     "id": "astra",
+     "label": "GPT 6 Astra (high)",
+     "via": "codex"
+    }
+   ],
+   "score": [
+    3,
+    9
+   ],
+   "winner": 1,
+   "decidedBy": "总分",
+   "rounds": [
+    {
+     "round": 1,
+     "score": [
+      0,
+      4
+     ],
+     "forts": [
+      "r1-hydrogen.json",
+      "r1-astra.json"
+     ],
+     "note": "",
+     "games": [
+      {
+       "seed": 20261115,
+       "left": 0,
+       "winner": 1,
+       "reason": "coreDestroyed",
+       "seconds": 14.6,
+       "coreHp": [
+        0,
+        500
+       ]
+      },
+      {
+       "seed": 20261115,
+       "left": 1,
+       "winner": 1,
+       "reason": "coreDestroyed",
+       "seconds": 12.4,
+       "coreHp": [
+        0,
+        500
+       ]
+      },
+      {
+       "seed": 20261116,
+       "left": 0,
+       "winner": 1,
+       "reason": "coreDestroyed",
+       "seconds": 12.8,
+       "coreHp": [
+        0,
+        500
+       ]
+      },
+      {
+       "seed": 20261116,
+       "left": 1,
+       "winner": 1,
+       "reason": "coreDestroyed",
+       "seconds": 13.4,
+       "coreHp": [
+        0,
+        500
+       ]
+      }
+     ]
+    },
+    {
+     "round": 2,
+     "score": [
+      3,
+      1
+     ],
+     "forts": [
+      "r2-hydrogen.json",
+      "r2-astra.json"
+     ],
+     "note": "",
+     "games": [
+      {
+       "seed": 20261115,
+       "left": 0,
+       "winner": 0,
+       "reason": "coreDestroyed",
+       "seconds": 31.9,
+       "coreHp": [
+        493,
+        0
+       ]
+      },
+      {
+       "seed": 20261115,
+       "left": 1,
+       "winner": 1,
+       "reason": "coreDestroyed",
+       "seconds": 51.9,
+       "coreHp": [
+        0,
+        103
+       ]
+      },
+      {
+       "seed": 20261116,
+       "left": 0,
+       "winner": 0,
+       "reason": "coreDestroyed",
+       "seconds": 35.9,
+       "coreHp": [
+        500,
+        0
+       ]
+      },
+      {
+       "seed": 20261116,
+       "left": 1,
+       "winner": 0,
+       "reason": "coreDestroyed",
+       "seconds": 36.3,
+       "coreHp": [
+        162,
+        0
+       ]
+      }
+     ]
+    },
+    {
+     "round": 3,
+     "score": [
+      0,
+      4
+     ],
+     "forts": [
+      "r3-hydrogen.json",
+      "r3-astra.json"
+     ],
+     "note": "",
+     "games": [
+      {
+       "seed": 20261115,
+       "left": 0,
+       "winner": 1,
+       "reason": "coreSunk",
+       "seconds": 4.9,
+       "coreHp": [
+        0,
+        500
+       ]
+      },
+      {
+       "seed": 20261115,
+       "left": 1,
+       "winner": 1,
+       "reason": "coreSunk",
+       "seconds": 14.6,
+       "coreHp": [
+        0,
+        500
+       ]
+      },
+      {
+       "seed": 20261116,
+       "left": 0,
+       "winner": 1,
+       "reason": "coreSunk",
+       "seconds": 5,
+       "coreHp": [
+        0,
+        500
+       ]
+      },
+      {
+       "seed": 20261116,
+       "left": 1,
+       "winner": 1,
+       "reason": "coreSunk",
+       "seconds": 14.6,
+       "coreHp": [
+        0,
+        500
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "2026-11-15-hydrogen-vs-terra",
+   "date": "2026-11-15",
+   "players": [
+    {
+     "id": "hydrogen",
+     "label": "Gemini 4 Hydrogen (High)",
+     "via": "agy"
+    },
+    {
+     "id": "terra",
+     "label": "GPT-6.1 Terra (high)",
+     "via": "codex"
+    }
+   ],
+   "score": [
+    4,
+    8
+   ],
+   "winner": 1,
+   "decidedBy": "总分",
+   "rounds": [
+    {
+     "round": 1,
+     "score": [
+      0,
+      4
+     ],
+     "forts": [
+      null,
+      "r1-terra.json"
+     ],
+     "note": "Gemini 4 Hydrogen (High) 超时未交；一方没有合规堡垒，判 4 局全负，本轮没有开打",
+     "games": []
+    },
+    {
+     "round": 2,
+     "score": [
+      0,
+      4
+     ],
+     "forts": [
+      null,
+      "r2-terra.json"
+     ],
+     "note": "Gemini 4 Hydrogen (High) 超时未交；一方没有合规堡垒，判 4 局全负，本轮没有开打",
+     "games": []
+    },
+    {
+     "round": 3,
+     "score": [
+      4,
+      0
+     ],
+     "forts": [
+      "r3-hydrogen.json",
+      "r3-terra.json"
+     ],
+     "note": "",
+     "games": [
+      {
+       "seed": 20261115,
+       "left": 0,
+       "winner": 0,
+       "reason": "coreDestroyed",
+       "seconds": 22.4,
+       "coreHp": [
+        472,
+        0
+       ]
+      },
+      {
+       "seed": 20261115,
+       "left": 1,
+       "winner": 0,
+       "reason": "coreDestroyed",
+       "seconds": 20.3,
+       "coreHp": [
+        500,
+        0
+       ]
+      },
+      {
+       "seed": 20261116,
+       "left": 0,
+       "winner": 0,
+       "reason": "coreDestroyed",
+       "seconds": 18.4,
+       "coreHp": [
+        500,
+        0
+       ]
+      },
+      {
+       "seed": 20261116,
+       "left": 1,
+       "winner": 0,
+       "reason": "coreDestroyed",
+       "seconds": 18.8,
+       "coreHp": [
+        500,
+        0
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

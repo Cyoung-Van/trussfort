@@ -19,6 +19,8 @@ export const ICON = {
   back: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
   replay: svg('<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4v4.5H9"/>'),
   close: svg('<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>'),
+  arena: svg('<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 5.5H5a3 3 0 0 0 3.2 3.9M16 5.5h3a3 3 0 0 1-3.2 3.9"/><path d="M12 13v4M8.5 20h7M9.5 17h5"/>'),
+  chev: svg('<path d="M9 6l6 6-6 6"/>'),
   field: svg('<path d="M3 18h6l1.5-4h3L15 18h6"/><path d="M3 18V8M21 18V8"/>'),
 };
 

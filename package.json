@@ -2,6 +2,7 @@
   "name": "trussfort",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "description": "桁垒 — 造桥式堡垒攻防小游戏",
   "scripts": {

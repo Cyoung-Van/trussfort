@@ -15,6 +15,7 @@ import { StructureView } from './render/structure.js';
 import { Fx } from './render/fx.js';
 import { GameAudio } from './audio/audio.js';
 import { Hud } from './ui/hud.js';
+import { ArenaPanel, shortName } from './ui/arena.js';
 import { rules, loadFort, exportFort, formatFort } from './ai/api.js';
 
 const SAVE_KEY = 'trussfort.blueprint.v1';
@@ -58,6 +59,8 @@ class Game {
     this.focus = 'field';       // 'field' 全景 | 'build' 我方特写
     this.resultTimer = -1;
     this.report = null;         // 上一场的战损报告，交给编辑器标出薄弱点
+    this.spectate = null;       // 观战回放：{ a, b, seed, names, caption, record, match, ri, gi }；此时不用也不改玩家的蓝图
+    this._replayGen = 0;        // 回放请求的代号：用户关掉列表、返回、重播或另开一场时加一，让还在路上的旧请求作废
     this._bpView = null;
     this._last = performance.now();
 
@@ -79,7 +82,14 @@ class Game {
         stress: () => this.toggleStress(),
         focus: () => this.toggleFocus(),
         report: () => this._clearReport(),
+        arena: () => this.openArena(),
+        next: () => this.playNext(),
       },
+    });
+    this.arena = new ArenaPanel({
+      root: this.uiRoot,
+      onPlay: (m, ri, gi) => this.playRecorded(m, ri, gi),
+      onDismiss: () => { this._replayGen++; },
     });
     this.world = new World({ canvas: this.glCanvas, view: this.view });
     this.structure = new StructureView(this.world);
@@ -271,6 +281,12 @@ class Game {
       resetEnemy: () => this.resetEnemy(),
       start: () => this.startBattle(),
       back: () => this.backToBlueprint(),
+      /** 对战回放：open() 打开列表；play(比赛目录名, 第几轮, 第几局) 直接看一局，返回 Promise<是否开始> */
+      replay: {
+        open: () => this.openArena(),
+        index: () => this.arena.load(),
+        play: (id, round = 1, game = 1) => this._playById(id, round, game),
+      },
       /** 当前这场的结果；还没打完时 winner 为 null */
       result: () => {
         const s = this.sim;
@@ -281,7 +297,13 @@ class Game {
     };
 
     // 3) 网址参数：?a=左边堡垒.json&b=右边堡垒.json&autostart=1（只在通过 http 打开时可用）
+    //    ?replay 打开回放列表；?replay=比赛目录名&round=2&game=1 直接看那一局
     const q = new URLSearchParams(location.search);
+    if (q.has('replay')) {
+      const id = q.get('replay');
+      if (id) this._playById(id, Number(q.get('round')) || 1, Number(q.get('game')) || 1).then((ok) => { if (!ok) this.openArena(); });
+      else this.openArena();
+    }
     const a = q.get('a'), b = q.get('b');
     if (a || b) {
       if (!/^https?:$/.test(location.protocol)) {
@@ -296,6 +318,18 @@ class Game {
         }).catch((e) => this.hud.toast(`读取堡垒失败：${e.message}`, 'error'));
       }
     }
+  }
+
+  /** 按「比赛目录名 + 第几轮 + 第几局」（都从 1 数）找到记录并播放 */
+  _playById(id, roundNo, gameNo) {
+    const gen = this._replayGen;
+    return this.arena.load().then((idx) => {
+      if (gen !== this._replayGen) return false;   // 等清单的时候用户已经去做别的了
+      const m = idx.matches.find((x) => x.id === id);
+      const ri = m ? m.rounds.findIndex((r) => r.round === roundNo) : -1;
+      if (ri < 0 || !m.rounds[ri].games[gameNo - 1]) { this.hud.toast('没有找到这一局的记录', 'error'); return false; }
+      return this.playRecorded(m, ri, gameNo - 1);
+    }, (e) => { this.hud.toast(e && e.message === 'file' ? '回放需要通过网址打开（在线版或本地服务器）' : `读取比赛清单失败：${e.message}`, 'error'); return false; });
   }
 
   _clearReport() {
@@ -321,8 +355,10 @@ class Game {
   /** @returns {boolean} 是否真的开战了 */
   startBattle(isReplay = false) {
     if (this.state !== 'blueprint') return false;
+    this._replayGen++;      // 无论是自己开战还是开始一局回放，之前没到的回放请求都作废
     this.editor.cancel();   // 先了结进行中的拖动，保证校验的和拿去模拟的是同一张蓝图
-    const cost = this.player.cost();
+    const spec = this.spectate;
+    const cost = spec ? 0 : this.player.cost();   // 回放的堡垒在比赛时已经过检查
     if (cost > CFG.budget) {
       this.hud.toast(`超出预算 $${(cost - CFG.budget).toLocaleString()}，先拆掉一些再开战`, 'error');
       this.audio.ui('error');
@@ -330,7 +366,9 @@ class Game {
     }
     this.audio.unlock();
     this.editor.setEnabled(false);
-    this.sim = new Sim(this.player, this.enemy, { seed: CFG.seed ?? 20261115 });
+    this.sim = spec
+      ? new Sim(spec.a, spec.b, { seed: spec.seed })
+      : new Sim(this.player, this.enemy, { seed: CFG.seed ?? 20261115 });
     this.acc = 0;
     this.paused = false;
     this.resultTimer = -1;
@@ -357,13 +395,17 @@ class Game {
 
   backToBlueprint() {
     if (this.state !== 'battle' && this.state !== 'toBattle') return;
-    this.report = this._makeReport();
+    this._replayGen++;
+    const spec = this.spectate;
+    if (!spec) this.report = this._makeReport();   // 回放打的不是玩家的蓝图，不留战损标记
     this.state = 'toBlueprint';
     this.tr = 1 - unsmooth(this.blend);   // 过渡中途返回时，从当前画面平滑反向
     this.hud.hideResult();
     this.hud.setMode('blueprint');
-    this.editor.setBattleReport(this.report);
-    this.hud.setReport(this.report && this.report.broken.size ? { count: this.report.broken.size } : null);
+    if (!spec) {
+      this.editor.setBattleReport(this.report);
+      this.hud.setReport(this.report && this.report.broken.size ? { count: this.report.broken.size } : null);
+    }
     // 回到进战斗前的取景；窗口在战斗中改过大小时那份取景已失效，按当前模式重新取景
     this.focus = this._bpFocus || 'field';
     this.hud.setFocus(this.focus);
@@ -371,12 +413,88 @@ class Game {
     this.view.animateTo(back, T_OUT);
     this.audio.ui('back');
     this.audio.stopBattle();
+    if (spec) { this.arena.open(); return; }   // 从回放退出来，回到列表
     // 第一次输了回来，提示一下标记的含义和示例的去处（只提示一次）
     if (this.report && this.report.winner === 'enemy' && this.report.broken.size) {
       let seen = false;
       try { seen = !!localStorage.getItem(TIP_KEY); localStorage.setItem(TIP_KEY, '1'); } catch { /* 忽略 */ }
       if (!seen) this.hud.toast('编号是杆件失守的先后，1 号最先。想看一种能赢的搭法，点「示例」', 'info');
     }
+  }
+
+  // ------------------------------------------------------------ 对战回放（看 arena/ 里记录的比赛）
+  openArena() {
+    if (this.state !== 'blueprint' && this.state !== 'toBlueprint') return;
+    this.editor.cancel();
+    this.arena.open();
+  }
+
+  /** 这一局之后还有没有下一局（同一场比赛里按轮次、局数顺序）；有就返回 [轮下标, 局下标] */
+  _nextGame(match, ri, gi) {
+    if (gi + 1 < match.rounds[ri].games.length) return [ri, gi + 1];
+    for (let r = ri + 1; r < match.rounds.length; r++) if (match.rounds[r].games.length) return [r, 0];
+    return null;
+  }
+
+  playNext() {
+    const sp = this.spectate;
+    const nx = sp && this._nextGame(sp.match, sp.ri, sp.gi);
+    if (nx) this.playRecorded(sp.match, nx[0], nx[1]);
+  }
+
+  /**
+   * 观看记录里的一局：载入双方当轮的堡垒，用记录的种子和左右站位开战。
+   * 不经过编辑器，玩家自己的蓝图和存档都不受影响。可以从蓝图界面开始，也可以在实景里直接切到另一局。
+   * @returns {Promise<boolean>} 是否开始了
+   */
+  async playRecorded(match, ri, gi) {
+    const round = match && match.rounds[ri], g = round && round.games[gi];
+    if (!g) return false;
+    if (this.state === 'toBlueprint') this._finishBack();   // 正在退回蓝图时点了另一局：直接收尾
+    const from = this.state;
+    if (from !== 'blueprint' && !(from === 'battle' && this.spectate)) return false;
+    // 文件要等一会儿才到。这期间用户可能关掉列表、返回、重播、自己开一场，或者又点了另一局：
+    // 只有代号没变（没人改主意）而且界面还停在原地，才真的开始
+    const gen = ++this._replayGen;
+    const fromSim = this.sim;
+    try {
+      const get = (f) => fetch(`arena/${match.id}/${f}`).then((r) => { if (!r.ok) throw new Error(`${f}（${r.status}）`); return r.json(); });
+      const [fl, fr] = await Promise.all([get(round.forts[g.left]), get(round.forts[1 - g.left])]);
+      if (gen !== this._replayGen || this.state !== from || this.sim !== fromSim) return false;
+      const a = loadFort(fl, 'player'), b = loadFort(fr, 'enemy');
+      const names = [shortName(match.players[g.left]), shortName(match.players[1 - g.left])];
+      const caption = `第 ${round.round} 轮 · 第 ${gi + 1} 局`;
+      // 记录里的胜者是选手下标，换成这一局里的左（player）右（enemy）
+      const record = { winner: g.winner == null ? null : g.winner === g.left ? 'player' : 'enemy', seconds: g.seconds };
+      const inBattle = from === 'battle';
+      if (inBattle) { this._teardownBattle(); this.state = 'blueprint'; }
+      this.spectate = { a, b, seed: g.seed, names, caption, record, match, ri, gi };
+      this.hud.setSpectate({ names, caption, hasNext: !!this._nextGame(match, ri, gi) });
+      this.arena.close();
+      if (!this.startBattle(inBattle)) {
+        this._endSpectate();
+        if (inBattle) { this.blend = 0; this.hud.setMode('blueprint'); this.editor.setEnabled(true); }
+        return false;
+      }
+      if (inBattle) { this.state = 'battle'; this.blend = 1; this.tr = 1; }   // 已经在实景里，跳过镜头过渡
+      return true;
+    } catch (e) {
+      if (gen === this._replayGen) this.hud.toast(`读取回放失败：${e && e.message ? e.message : e}`, 'error');
+      return false;
+    }
+  }
+
+  _endSpectate() {
+    this.spectate = null;
+    this.hud.setSpectate(null);
+  }
+
+  /** 退回蓝图的过渡结束（或被提前收尾）：丢掉这场模拟，交还编辑器 */
+  _finishBack() {
+    this.state = 'blueprint'; this.blend = 0;
+    this._teardownBattle();
+    this.editor.setEnabled(true);
+    if (this.spectate) this._endSpectate();
   }
 
   /** 同一张蓝图再打一遍（结果可复现，相当于回放） */
@@ -459,11 +577,7 @@ class Game {
     } else if (this.state === 'toBlueprint') {
       this.tr += dt / T_OUT;
       this.blend = 1 - smooth(this.tr);
-      if (this.tr >= 1) {
-        this.state = 'blueprint'; this.blend = 0;
-        this._teardownBattle();
-        this.editor.setEnabled(true);
-      }
+      if (this.tr >= 1) this._finishBack();
     }
 
     const sim = this.sim;
@@ -493,11 +607,16 @@ class Game {
             this.resultTimer = -1;
             // 落水的核心耐久没清零，但它已经没了：结算里按 0 显示，和对决条一致
             const hp = (c) => (c.alive ? Math.max(0, c.hp) : 0);
+            // 回放理应和比赛记录一模一样；不同浏览器的数学库有细微差别时可能走样，这时如实标出来
+            const rec = this.spectate && this.spectate.record;
+            const off = rec && (rec.winner !== (sim.winner === 'player' || sim.winner === 'enemy' ? sim.winner : null) || Math.abs(rec.seconds - sim.fightTime) > 0.11);
+            const recWho = off ? (rec.winner === 'player' ? this.spectate.names[0] + ' 胜' : rec.winner === 'enemy' ? this.spectate.names[1] + ' 胜' : '平局') : '';
             this.hud.showResult({
               winner: sim.winner, reason: sim.endReason, time: sim.fightTime,
               stats: sim.stats, playerHp: hp(sim.cores[0]), enemyHp: hp(sim.cores[1]), hpMax: sim.cores[0].hpMax,
+              note: off ? `这个浏览器算出的结果和比赛记录不同，记录是 ${recWho}、${rec.seconds} 秒` : '',
             });
-            this.audio.ui(sim.winner === 'player' ? 'win' : sim.winner === 'enemy' ? 'lose' : 'draw');
+            this.audio.ui(this.spectate || sim.winner === 'player' ? 'win' : sim.winner === 'enemy' ? 'lose' : 'draw');
           } else {
             this.resultTimer = 1e-6;   // 镜头过渡还没结束就分出了胜负：等进入实景再弹结算
           }
@@ -507,11 +626,13 @@ class Game {
 
     // 画面
     this.world.setBlend(this.blend);
-    if (this.blend > 0.001) {            // 蓝图完全盖住实景时，水面和旗子不必白算
+    // 回放打的不是蓝图上那两座堡垒，所以过渡时不让蓝图画布和实景叠在一起：直接看实景从正视推成透视
+    const hideBp = !!this.spectate;
+    if (this.blend > 0.001 || hideBp) {  // 蓝图完全盖住实景时，水面和旗子不必白算
       this.world.update(dt, now / 1000);
       this.world.render();
     }
-    const bpAlpha = 1 - smooth((this.blend - 0.08) / 0.6);
+    const bpAlpha = hideBp ? 0 : 1 - smooth((this.blend - 0.08) / 0.6);
     this.bpCanvas.style.opacity = bpAlpha.toFixed(3);
     this.bpCanvas.style.visibility = bpAlpha > 0.001 ? 'visible' : 'hidden';
     if (bpAlpha > 0.001) this.editor.draw(dt);
@@ -561,6 +682,10 @@ class Game {
       const repeatOk = e.code === 'BracketLeft' || e.code === 'BracketRight' || e.code === 'KeyZ' || e.code === 'KeyY';
       if (e.repeat && !repeatOk) return;
       const mod = e.metaKey || e.ctrlKey;
+      if (this.arena.isOpen) {           // 回放列表开着时，键盘只管关掉它
+        if (e.code === 'Escape') { e.preventDefault(); this.arena.dismiss(); }
+        return;
+      }
       if (this.state === 'blueprint') {
         if (mod && e.code === 'KeyZ') { e.preventDefault(); if (e.shiftKey) this.editor.redo(); else this.editor.undo(); return; }
         if (mod && e.code === 'KeyY') { e.preventDefault(); this.editor.redo(); return; }
@@ -575,6 +700,7 @@ class Game {
         if (e.code === 'Escape' || e.code === 'Backspace') { e.preventDefault(); this.backToBlueprint(); return; }
         if (e.code === 'Space') { e.preventDefault(); this.togglePause(); return; }
         if (e.code === 'KeyR') { this.replay(); return; }
+        if (e.code === 'KeyN' && this.spectate) { this.playNext(); return; }
         if (e.code === 'KeyT') { this.toggleStress(); return; }
         if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
           const i = SPEEDS.indexOf(this.speed);

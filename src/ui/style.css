@@ -527,6 +527,84 @@ body { font-family: var(--font); color: var(--ink); -webkit-font-smoothing: anti
 /* ------------------------------------------------------------ 公用小动画 */
 @keyframes pop-in { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: none; } }
 
+/* ------------------------------------------------------------ 对战回放：入口按钮、列表面板、观战时的场次说明 */
+.topright .arena-btn { padding: 0 13px 0 11px; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; }
+.rs-title.named { font-size: 34px; letter-spacing: 0.04em; padding-left: 0; line-height: 1.3; }
+.spec-cap {
+  position: absolute; left: 50%; top: 88px; transform: translateX(-50%);
+  display: none; align-items: center; height: 24px; padding: 0 12px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.06em; color: var(--ink-soft); white-space: nowrap;
+}
+.hud.spectate .spec-cap { display: inline-flex; }
+
+.arena {
+  position: absolute; inset: 0; z-index: 8;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(15, 39, 71, 0.36);
+  opacity: 0; visibility: hidden;
+  transition: opacity 160ms ease-out, visibility 0s linear 160ms;
+}
+.arena.on { opacity: 1; visibility: visible; transition: opacity 160ms ease-out, visibility 0s; }
+#ui .arena:not(.on) { pointer-events: none; }
+.arena-card {
+  width: 640px; max-width: calc(100vw - 2 * var(--gutter)); max-height: calc(100vh - 2 * var(--gutter));
+  display: flex; flex-direction: column;
+  border-radius: 20px; background: rgba(255, 255, 255, 0.97);
+  transform: translateY(8px) scale(0.985);
+  transition: transform 180ms ease-out;
+}
+.arena.on .arena-card { transform: none; }
+.ar-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 20px 16px 14px 24px; border-bottom: 1px solid var(--line);
+}
+.ar-title { font-size: 20px; font-weight: 700; letter-spacing: 0.08em; line-height: 1.2; }
+.ar-sub { margin-top: 6px; font-size: 13px; font-weight: 500; line-height: 1.5; color: var(--ink-soft); }
+.ar-body { overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 14px; }
+.ar-msg { padding: 30px 14px; text-align: center; font-size: 14px; font-weight: 500; line-height: 1.8; color: var(--ink-soft); }
+.ar-match + .ar-match { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
+.ar-match > summary {
+  list-style: none; cursor: pointer;
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 3px 12px;
+  padding: 11px 10px 11px 12px; border-radius: 12px;
+  transition: background-color var(--t) ease-out;
+}
+.ar-match > summary::-webkit-details-marker { display: none; }
+.ar-match > summary:hover { background: var(--ink-wash); }
+.ar-date { font-size: 12px; font-weight: 600; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.ar-vs { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 9px; font-size: 16px; }
+.ar-vs .won { font-weight: 700; }
+.ar-vs .lost { font-weight: 500; color: var(--ink-soft); }
+.ar-score { font-weight: 700; font-variant-numeric: tabular-nums; }
+.ar-chev { color: var(--ink-soft); transition: transform var(--t) ease-out; }
+.ar-chev .ic { width: 18px; height: 18px; }
+.ar-match[open] .ar-chev { transform: rotate(90deg); }
+.ar-models { grid-column: 2 / 4; font-size: 12px; font-weight: 500; color: var(--ink-soft); }
+.ar-round { padding: 2px 10px 8px 12px; }
+.ar-rhead {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 8px 2px 7px; font-size: 12px; font-weight: 700; letter-spacing: 0.12em; color: var(--ink-soft);
+}
+.ar-rscore { letter-spacing: 0.04em; font-variant-numeric: tabular-nums; color: var(--ink); }
+.ar-note { padding: 0 2px 6px; font-size: 12.5px; font-weight: 500; line-height: 1.5; color: var(--ink-soft); }
+.ar-game {
+  display: grid; grid-template-columns: 50px minmax(0, 1fr) auto 22px; align-items: center; gap: 10px;
+  width: 100%; padding: 9px 10px 9px 12px; border-radius: 11px;
+  text-align: left; background-color: var(--ink-wash);
+}
+.ar-game + .ar-game { margin-top: 5px; }
+.ar-game:hover { background-color: var(--accent-wash); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.ar-game:active { transform: scale(0.99); }
+.ar-gno { font-size: 12px; font-weight: 700; color: var(--ink-soft); white-space: nowrap; }
+.ar-sides { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ar-sides .l { color: var(--player); }
+.ar-sides .r { color: var(--enemy); }
+.ar-sides .x { font-weight: 500; color: var(--ink-soft); }
+.ar-res { font-size: 12.5px; font-weight: 600; color: var(--ink-soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ar-play { color: var(--ink-soft); }
+.ar-play .ic { width: 18px; height: 18px; }
+.ar-game:hover .ar-play { color: var(--ink); }
+
 /* ------------------------------------------------------------ 窄屏：工具栏只留色样、图标与键帽 */
 /* .hud.compact 由 hud.js 在工具栏实际放不下时加上，规则与窄屏相同 */
 @media (max-width: 1179px) {
@@ -570,6 +648,7 @@ body { font-family: var(--font); color: var(--ink); -webkit-font-smoothing: anti
   .duel-mid { min-width: 76px; }
   .timer { font-size: 22px; }
   .ctrl .kc { display: none; }
+  .topright .arena-btn { padding: 0 10px; }
 }
 
 /* ------------------------------------------------------------ 很窄的窗口（约 480–700px，比如侧边预览面板）：顶栏分两行，工具栏铺满 */
@@ -597,6 +676,12 @@ body { font-family: var(--font); color: var(--ink); -webkit-font-smoothing: anti
   .banner { font-size: 26px; padding: 8px 22px 8px 30px; }
   .ctrl { bottom: 12px; }
   .speed { min-width: 40px; padding: 0 6px; }
+  .topright .arena-text { display: none; }
+  .spec-cap { top: 124px; }
+  .ar-head { padding: 16px 12px 12px 18px; }
+  .ar-game { grid-template-columns: 50px minmax(0, 1fr) 22px; gap: 3px 10px; }
+  .ar-res { grid-column: 2 / 3; grid-row: 2; white-space: normal; }
+  .ar-play { grid-column: 3; grid-row: 1 / 3; }
 }
 
 @media (prefers-reduced-motion: reduce) {
