@@ -141,4 +141,6 @@ npm run battle     # 在终端里跑一场对战并打印时间线
 
 ## 许可证
 
-[MIT](LICENSE)。打包文件 `dist/game.js` 里包含 three.js（同为 MIT 许可）。
+[PolyForm Noncommercial 1.0.0](LICENSE)：可以自由游玩、修改和分享，但不得用于商业目的。
+
+打包文件 `dist/game.js` 里包含 three.js，它按自己的 MIT 许可发布。
