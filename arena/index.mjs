@@ -47,6 +47,7 @@ export function buildIndex(dir = HERE) {
     });
     matches.push({
       id,
+      rules: res.rules || 'v1',   // 这场比赛用的规则版本；回放必须按它来（没有这个字段的是最早的 v1）
       date: (/^\d{4}-\d{2}-\d{2}/.exec(id) || [''])[0],
       players: res.players.map((p) => ({ id: p.id, label: p.label, via: p.via })),
       score: res.players.map((p) => p.score),

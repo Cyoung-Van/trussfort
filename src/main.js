@@ -117,6 +117,10 @@ class Game {
     this.hud.setFocus(this.focus);
 
     this._warmUp();
+    if (this._droppedCannons) {
+      this.hud.toast(`规则更新：炮座不能再接锚点或贴地，已拆除 ${this._droppedCannons} 门不合规的炮并退款`, 'info');
+      this._save();
+    }
 
     requestAnimationFrame((t) => this.frame(t));
   }
@@ -162,8 +166,12 @@ class Game {
       const raw = localStorage.getItem(SAVE_KEY);
       if (!raw) return null;
       const bp = Blueprint.fromJSON(JSON.parse(raw), 'player');
-      // 存档损坏、或规则变了导致旧存档不合法时，直接丢弃
-      return bp.validate() === null ? bp : null;
+      // 规则更新后，旧存档里架在锚点或地面上的炮不再合法：只拆掉这些炮（等于退款），结构原样留着
+      this._droppedCannons = bp.dropIllegalCannons();
+      // 存档损坏、或规则变了导致旧存档仍不合法时，直接丢弃
+      if (bp.validate() === null) return bp;
+      this._droppedCannons = 0;
+      return null;
     } catch { return null; }
   }
   _save() {
@@ -275,7 +283,7 @@ class Game {
 
     // 2) 控制台 / 外部脚本接口
     window.trussfort = {
-      rules,
+      rules,                       // rules() 当前规则；rules('v1') 旧版本
       loadFort: (side, desc) => this.setFort(side, desc),
       exportFort: (side) => exportFort(side === 'enemy' ? this.enemy : this.player),
       resetEnemy: () => this.resetEnemy(),
@@ -367,7 +375,7 @@ class Game {
     this.audio.unlock();
     this.editor.setEnabled(false);
     this.sim = spec
-      ? new Sim(spec.a, spec.b, { seed: spec.seed })
+      ? new Sim(spec.a, spec.b, { seed: spec.seed, rules: spec.rules })
       : new Sim(this.player, this.enemy, { seed: CFG.seed ?? 20261115 });
     this.acc = 0;
     this.paused = false;
@@ -461,14 +469,16 @@ class Game {
       const get = (f) => fetch(`arena/${match.id}/${f}`).then((r) => { if (!r.ok) throw new Error(`${f}（${r.status}）`); return r.json(); });
       const [fl, fr] = await Promise.all([get(round.forts[g.left]), get(round.forts[1 - g.left])]);
       if (gen !== this._replayGen || this.state !== from || this.sim !== fromSim) return false;
-      const a = loadFort(fl, 'player'), b = loadFort(fr, 'enemy');
+      // 比赛记录带着自己的规则版本：堡垒的合法性和战斗结算都按当时的规则来，回放才会和记录一致
+      const rules = match.rules || 'v1';
+      const a = loadFort(fl, 'player', rules), b = loadFort(fr, 'enemy', rules);
       const names = [shortName(match.players[g.left]), shortName(match.players[1 - g.left])];
       const caption = `第 ${round.round} 轮 · 第 ${gi + 1} 局`;
       // 记录里的胜者是选手下标，换成这一局里的左（player）右（enemy）
       const record = { winner: g.winner == null ? null : g.winner === g.left ? 'player' : 'enemy', seconds: g.seconds };
       const inBattle = from === 'battle';
       if (inBattle) { this._teardownBattle(); this.state = 'blueprint'; }
-      this.spectate = { a, b, seed: g.seed, names, caption, record, match, ri, gi };
+      this.spectate = { a, b, seed: g.seed, rules, names, caption, record, match, ri, gi };
       this.hud.setSpectate({ names, caption, hasNext: !!this._nextGame(match, ri, gi) });
       this.arena.close();
       if (!this.startBattle(inBattle)) {
@@ -545,7 +555,12 @@ class Game {
       this.audio.onEvent(e, sim);
       this.hud.onEvent(e, sim);
       if (e.type === 'break' && e.side === 0 && e.cause !== 'sunk' && !this._collect.broken.has(e.bpId)) {
-        this._collect.broken.set(e.bpId, { order: ++this._collect.order, cause: e.cause, t: sim.time });
+        // 模拟里的一根构件可能对应蓝图里几段共线的杆：一起标上同一个序号
+        const info = { order: ++this._collect.order, cause: e.cause, t: sim.time };
+        for (const id of e.bpIds || [e.bpId]) this._collect.broken.set(id, info);
+      } else if (e.type === 'fightStart' && !this.spectate) {
+        const stuck = sim.cannons.filter((c) => c.side === 0 && c.alive && c.grounded).length;
+        if (stuck) this.hud.toast(`有 ${stuck} 门炮的炮座贴在地面上，开不了火`, 'error');
       } else if (e.type === 'end') {
         this.resultTimer = RESULT_DELAY;
       }
@@ -559,8 +574,7 @@ class Game {
     for (let i = 0; i < beams.length; i++) {
       const b = beams[i];
       if (b.side !== 0 || !b.alive) continue;
-      const p = peak.get(b.bpId) || 0;
-      if (b.stressVis > p) peak.set(b.bpId, b.stressVis);
+      for (const id of b.bpIds) { if (b.stressVis > (peak.get(id) || 0)) peak.set(id, b.stressVis); }
     }
   }
 

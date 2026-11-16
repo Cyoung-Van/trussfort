@@ -360,6 +360,12 @@ export class Editor {
     return { ok: true };
   }
 
+
+  /** 假如这样改，造价会变多少：在蓝图副本上试一遍再比。改不成返回 null */
+  _costIf(change) {
+    const cl = this.player.clone();
+    return change(cl) ? cl.cost() - this.player.cost() : null;
+  }
   /** 造杆目标：光标附近的已有节点，否则最近网格点 */
   _target(from) {
     const { x, y } = this._world();
@@ -371,12 +377,15 @@ export class Editor {
     if (!t.node) { const ex = bp.nodeAt(t.x, t.y); if (ex) t.node = ex.id; }
     t.same = t.node === from;
     t.len = Math.hypot(t.x - fn.x, t.y - fn.y);
-    t.price = Blueprint.priceFor(mat, fn.x, fn.y, t.x, t.y);
+    // 价格在蓝图副本上试搭一遍再比：装配费、和相邻杆件共线合并后少收的那份，都算在里面
+    const hyp = t.same ? null : this._costIf((cl) => { const a = cl.addNode(fn.x, fn.y), b = cl.addNode(t.x, t.y); return a.ok && b.ok && cl.addBeam(a.id, b.id, mat).ok; });
+    t.price = hyp != null ? hyp : Blueprint.priceFor(mat, fn.x, fn.y, t.x, t.y);
     let why = null;
     if (t.same) why = '同一个节点';
     else if (t.node && bp.beamBetween(from, t.node)) why = '这里已经有杆件';
     else if (!t.node) why = bp.checkNodePos(t.x, t.y);
     if (!why) why = bp.checkSpan(mat, fn.x, fn.y, t.x, t.y);
+    if (!why && bp.rules.noOverlap && bp._overlapping(fn.x, fn.y, t.x, t.y)) why = '和已有杆件重叠';
     t.reason = why;
     t.valid = !why;
     t.fx = fn.x; t.fy = fn.y; t.mat = mat;
@@ -824,7 +833,9 @@ export class Editor {
           const a = bp.nodes.get(b.a), c = bp.nodes.get(b.b);
           let why = bp.checkSpan(tool, a.x, a.y, c.x, c.y);
           if (!why && bp.cannonOn(b.id) && !CANNON.mountMats.includes(tool)) why = '上面架着火炮，不能换成这种材料';
-          const delta = Blueprint.priceFor(tool, a.x, a.y, c.x, c.y) - cost;
+          // 在副本上换一遍再比：换材料可能让原本合并的共线杆件分开，多出一份装配费
+          const hyp = this._costIf((cl) => cl.setBeamMat(b.id, tool).ok);
+          const delta = hyp != null ? hyp : Blueprint.priceFor(tool, a.x, a.y, c.x, c.y) - bp.rules.assemblyFee - cost;
           info = why ? { text: why, color: BP.invalid, bad: true }
             : { text: `换成${MATERIALS[tool].name} ${signed(delta)}`, color: BP.highlight };
         } else if (tool === 'cannon') {

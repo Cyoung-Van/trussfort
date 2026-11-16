@@ -14,7 +14,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { rules, loadFort, exportFort, formatFort, checkFort, duel, match } from '../src/ai/api.js';
-import { makeEnemyFort, makeStarterFort, makeReferenceFort } from '../src/sim/forts.js';
+import { CFG, MATERIALS, CANNON } from '../src/config.js';
+import { makeEnemyFort, makeReferenceFort } from '../src/sim/forts.js';
+import { CURRENT_RULES } from '../src/rules.js';
 import { buildIndex } from './index.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -81,7 +83,7 @@ async function ask(p, body, timeoutSec, tag) {
   if (MOCK) {
     await new Promise((r) => setTimeout(r, 300));
     const n = mockN++;
-    const text = n === 1 ? '这是一段不合规的回答 {"beams": [[[0,0],[9,9],"wood"]]}' : formatFort(exportFort((p.via === 'agy' ? makeReferenceFort : makeEnemyFort)()));
+    const text = n === 1 ? '这是一段不合规的回答 {"beams": [[[0,0],[9,9],"wood"]]}' : formatFort(exportFort((p.via === 'agy' ? makeReferenceFort : makeEnemyFort)().clone('player')));
     p.mem = 'mock';
     res = { text: '好的，方案如下：\n```json\n' + text + '\n```', seconds: 0.3, timedOut: false };
   } else if (p.via === 'agy') {
@@ -142,16 +144,30 @@ function tryFort(text, name) {
 // ---------- 给模型的文字 ----------
 const aiDoc = fs.readFileSync(path.join(ROOT, 'AI.md'), 'utf8');
 const section = (title) => { const m = new RegExp(`## ${title}\\n([\\s\\S]*?)(?=\\n## |$)`).exec(aiDoc); return m ? `## ${title}\n${m[1].trim()}` : ''; };
-const SAMPLES = { starter: exportFort(makeStarterFort()), reference: exportFort(makeReferenceFort()), enemy: exportFort(makeEnemyFort()) };
-const sampleFacts = (() => {
-  const s = match(SAMPLES.starter, SAMPLES.enemy, { games: 4 }), r = match(SAMPLES.reference, SAMPLES.enemy, { games: 4 });
-  const d = duel(SAMPLES.reference, SAMPLES.enemy);
-  return { s, r, d };
+// 赛前材料里不放完整的堡垒：给过完整样板之后，所有参赛方都从它改起，结构趋同（前两场比赛的教训）。
+// 只给几个「局部原理」的小例子，每个例子后面的事实都是裁判当场用引擎算出来的。
+const PRINCIPLES = (() => {
+  const base = (mat) => [[[0, 0], [2, 0], mat], [[0, -2], [2, 0], mat], [[2, 0], [4, 3], mat], [[0, 0], [2, 3], mat], [[2, 3], [4, 3], mat], [[2, 0], [2, 3], mat]];
+  const stat = (f) => checkFort(f, { ignoreBudget: true }).static;
+  // 1. 三角形才站得住：只用两根杆把核心「挂」出去，和用三角形托住
+  const chain = [[[0, 0], [2, 3], 'wood'], [[2, 3], [4, 3], 'wood']];
+  const s1a = stat({ beams: chain, cannons: [] }), s1b = stat({ beams: base('wood'), cannons: [] });
+  // 2. 后坐力：同一门平射炮，架在 2 米高的矮台上、6 米高的木塔上、6 米高的钢塔上
+  const low = (leg) => ({ beams: [...base('steel'), [[-6, 0], [-5, 2], leg], [[-3, 0], [-5, 2], leg], [[-3, 0], [-2, 2], leg], [[0, 0], [-2, 2], leg], [[-5, 2], [-2, 2], leg]], cannons: [[[-5, 2], [-2, 2], 15]] });
+  const tower = (leg) => ({ beams: [...base('steel'), [[-3, 0], [-2, 3], leg], [[0, 0], [0, 3], leg], [[0, 0], [-2, 3], leg], [[-2, 3], [0, 3], leg], [[-2, 3], [-2, 6], leg], [[0, 3], [0, 6], leg], [[-2, 3], [0, 6], leg], [[-2, 6], [0, 6], leg]], cannons: [[[-2, 6], [0, 6], 15]] });
+  const target = { beams: base('steel'), cannons: [] };
+  const fire = (f) => {
+    try {
+      const d = duel(f, target, { ignoreBudget: true, allowUnarmed: true });
+      const c = d.A.cannons[0];
+      return `开火 ${c.shots} 发，炮座最大偏角 ${c.maxTiltDeg}°，自家被后坐力震断 ${d.A.members.filter((m) => m.broke && m.broke.cause === 'stress').length} 根杆${c.lost ? `，${c.lost.t} 秒时火炮${c.lost.cause === 'fell' ? '随炮座掉落' : '失去'}` : ''}`;
+    } catch (e) { return '（算不出：' + e.message + '）'; }
+  };
+  return { chain, braced: base('wood'), s1a, s1b, low: low('wood'), tower: tower('wood'), fireLow: fire(low('wood')), fireWood: fire(tower('wood')), fireSteel: fire(tower('steel')) };
 })();
 const rows = (arr) => arr.map((x) => JSON.stringify(x)).join('\n');
 
 function briefing(p) {
-  const f = sampleFacts;
   return `你正在参加一场「桁垒 TRUSSFORT」堡垒设计对抗赛。你是参赛方「${p.label}」，对手是另一家的 AI 模型，裁判是 Claude。
 
 # 比赛规则
@@ -174,15 +190,17 @@ ${section('设计时要知道的物理')}
 ## 规则数值（引擎导出，以此为准）
 ${JSON.stringify(rules())}
 
-## 三座示例堡垒（双方都能看到）
-starter：弱。对 enemy 打 4 局，赢 ${f.s.aWins} 局。
-${formatFort(SAMPLES.starter)}
-reference：造价 ${f.d.A.cost}。对 enemy 打 4 局，赢 ${f.r.aWins} 局。其中一局（reference 在左）：${f.d.winner === 'A' ? 'reference 胜' : f.d.winner === 'B' ? 'enemy 胜' : '平局'}，原因 ${f.d.reason}，交火 ${f.d.fightSeconds} 秒；reference 的各门炮：
-${rows(f.d.A.cannons)}
-${formatFort(SAMPLES.reference)}
-enemy：游戏默认敌人，造价 ${f.d.B.cost}。上面那一局里它的各门炮：
-${rows(f.d.B.cannons)}
-${formatFort(SAMPLES.enemy)}
+## 几个局部原理（不是完整的堡垒，只说明规则怎么起作用；后面的数字都是裁判用引擎算的）
+1. 没有三角形支撑的结构是机构，会折叠。只用两根木杆把核心「挂」出去：
+${formatFort({ beams: PRINCIPLES.chain, cannons: [] })}静载结果：核心${PRINCIPLES.s1a.coreHeld ? '托住了' : `没托住，下沉 ${PRINCIPLES.s1a.coreSagMeters} 米`}。改成三角形托住：
+${formatFort({ beams: PRINCIPLES.braced, cannons: [] })}静载结果：核心${PRINCIPLES.s1b.coreHeld ? '托住了' : '没托住'}，自重下断了 ${PRINCIPLES.s1b.membersLostUnderOwnWeight} 根，受力峰值 ${PRINCIPLES.s1b.peakStressRatio}（1 就是到极限）。
+2. 炮座必须由你自己搭的结构托着：炮座杆件的两端都不能是锚点，也不能贴地。火炮重 ${CANNON.mass} kg，后坐力是真实载荷，架得越高越难扛。同一门 15° 平射的炮，对着一座不还手的靶子打完一场：
+   架在 2 米高的木头矮台上（下面的 cannons 所在的那根杆）：${PRINCIPLES.fireLow}。
+${formatFort(PRINCIPLES.low)}   架在 6 米高的木塔顶上：${PRINCIPLES.fireWood}。
+${formatFort(PRINCIPLES.tower)}   同一座塔全部换成钢杆：${PRINCIPLES.fireSteel}。
+3. 绳索只受拉，松了就不传力；它很细，挡不住一整发炮弹，也挡不住溅射。
+4. 一发炮弹有 ${CFG.shell.directDamage} 点直击伤害：剩余耐久小于这个数的杆件会被打穿，炮弹减速后带着剩下的伤害继续飞。一层木杆（耐久 ${MATERIALS.wood.hp}）挡不住一发，钢杆（耐久 ${MATERIALS.steel.hp}）可以。
+5. 溅射伤害会被爆点和目标之间的杆件挡住，所以顶盖和外墙能护住后面的东西。
 战报字段：landed 是这门炮的炮弹都落在了哪（enemy_member / enemy_core / enemy_cannon / own_member / own_core / own_cannon / ground / water），出现 own_ 说明在打自己；maxTiltDeg 是炮座最大偏角；peak 是杆件受力峰值（1 就是到极限）；broke.cause 中 stress 是被压断或拉断，blast 是被炸断，sunk 是沉没。reason 中 coreDestroyed 是核心被打爆，coreSunk 是核心落水，timeout 是到时按核心耐久判定。`;
 }
 
@@ -294,6 +312,7 @@ async function main() {
   }
   const result = {
     players: players.map((p) => ({ id: p.id, label: p.label, via: p.via, model: p.model, score: p.score, halted: p.halted })),
+    rules: CURRENT_RULES,   // 这场比赛用的规则版本，回放时按它来
     winner: winner || 'draw', decidedBy: winner ? by : '全部相同',
     rounds: history, totalSeconds: Math.round(elapsed()), limitSeconds: MINUTES * 60, mock: MOCK,
   };

@@ -31,4 +31,5 @@ export const SWATCH = {
   rope: svg('<path d="M3 6h24" stroke-width="1.3" stroke-dasharray="3 2.6"/>', 'sw', '0 0 30 12'),
   spring: svg('<path d="M2 6h4l2-3.6 3 7.2 3-7.2 3 7.2 3-7.2 2 3.6h6" stroke-width="1.6"/>', 'sw', '0 0 30 12'),
   cannon: svg('<path d="M9 7.4l13-5 1.3 2.8-12.4 5.6"/><circle cx="10.5" cy="8.4" r="2.6"/>', 'sw', '0 0 30 12'),
+  assembly: svg('<path d="M3 6h7M20 6h7" stroke-width="2.6"/><circle cx="15" cy="6" r="3.2"/>', 'sw', '0 0 30 12'),
 };

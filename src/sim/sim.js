@@ -9,6 +9,7 @@
 import { CFG, MATERIALS, CANNON, CORE, worldX, worldAngle } from '../config.js';
 import { cannonPoseFrom } from './blueprint.js';
 import { makeRng } from './rng.js';
+import { getRules } from '../rules.js';
 
 const DEG = Math.PI / 180;
 
@@ -19,9 +20,11 @@ export class Sim {
   /**
    * @param {Blueprint} bpPlayer 左侧（玩家）蓝图
    * @param {Blueprint} bpEnemy  右侧（敌方）蓝图，本地坐标，这里做镜像
-   * @param {{seed?:number, peace?:boolean}} opts peace=true 时永不开火、不判胜负（只看结构受力）
+   * @param {{seed?:number, peace?:boolean, rules?:string|object}} opts peace=true 时永不开火、不判胜负（只看结构受力）；
+   *   rules 是规则版本（见 rules.js），不传就用左侧蓝图自带的版本
    */
   constructor(bpPlayer, bpEnemy, opts = {}) {
+    this.R = opts.rules ? getRules(opts.rules) : bpPlayer.rules || getRules();
     this.seed = opts.seed ?? 20261115;
     this.peace = !!opts.peace;
     this.rng = makeRng(this.seed);
@@ -98,16 +101,20 @@ export class Sim {
     }
     const beamIdx = new Map();
     const rank = (bm) => { const p = map.get(bm.a), q = map.get(bm.b); return p < q ? [p, q] : [q, p]; };
-    const beamList = [...bp.beams.values()].sort((u, v) => { const ru = rank(u), rv = rank(v); return ru[0] - rv[0] || ru[1] - rv[1]; });
+    // 进模拟的是「构件」：规则要求时，同材质共线的几段杆合成一根（见 Blueprint.mergeGroups）；
+    // 被合并掉的中间节点没有杆件连着，下面 _refreshNode 会把它当孤立节点移除
+    // 归并按这场模拟的规则来（不是蓝图自带的），排序把材料也算进去：端点相同的两根构件也有确定的先后
+    const beamList = bp.mergeGroups(this.R).sort((u, v) => { const ru = rank(u), rv = rank(v); return ru[0] - rv[0] || ru[1] - rv[1] || (u.mat < v.mat ? -1 : u.mat > v.mat ? 1 : 0); });
     for (const bm of beamList) {
       const a = map.get(bm.a), b = map.get(bm.b);
       const mat = MATERIALS[bm.mat];
       const rest = Math.hypot(this.x[a] - this.x[b], this.y[a] - this.y[b]);
       const beam = {
-        idx: this.beams.length, bpId: bm.id, side, a, b, mat, matId: bm.mat,
+        idx: this.beams.length, bpId: bm.ids[0], bpIds: bm.ids, side, a, b, mat, matId: bm.mat,
         rest, compliance: rest / mat.EA, beta: mat.beta, tensionOnly: mat.tensionOnly, mass: mat.density * rest,
         alive: true, hp: mat.hp, hpMax: mat.hp,
         slack: false,  // 绳索当前是否松弛
+        touch: false,  // 杆件中段是否正搭在地形上（见地形碰撞那一步）
         lam: 0,        // 本子步的约束乘子
         f: 0,          // 滤波后的轴力 N（拉为正）
         stress: 0,     // 当前受力 / 极限
@@ -117,7 +124,7 @@ export class Sim {
       this.beams.push(beam);
       this.nodeBeams[a].push(beam.idx);
       this.nodeBeams[b].push(beam.idx);
-      beamIdx.set(bm.id, beam.idx);
+      for (const id of bm.ids) beamIdx.set(id, beam.idx);
     }
     let k = 0;
     const cannonList = [...bp.cannons.values()].sort((u, v) => beamIdx.get(u.beam) - beamIdx.get(v.beam));
@@ -134,6 +141,7 @@ export class Sim {
         recoil: 0,     // 画面用的后坐动画量：开火瞬间置 1，随后回落到 0
         px: pose.px, py: pose.py, mx: pose.mx, my: pose.my, angle: pose.angle,
         tilt: 0,       // 炮管当前方向相对设计方向的偏差（弧度）
+        grounded: false, // 炮座节点正贴着地面（规则不允许时，这门炮不能开火）
         lastHit: -10,
       });
       k++;
@@ -263,6 +271,7 @@ export class Sim {
         if (!b.alive) continue;
         const i = b.a, j = b.b;
         if (w[i] + w[j] === 0) continue;
+        b.touch = false;
         const my = (y[i] + y[j]) * 0.5;
         if (my >= 0) continue;
         const mx = (x[i] + x[j]) * 0.5;
@@ -270,6 +279,7 @@ export class Sim {
         if (mx < 0) { if (-my <= -mx) dy = -my; else dx = -mx; }
         else if (mx > W) { if (-my <= mx - W) dy = -my; else dx = W - mx; }
         else continue;
+        b.touch = true;
         if (w[i] > 0) { x[i] += dx; y[i] += dy; }
         if (w[j] > 0) { x[j] += dx; y[j] += dy; }
       }
@@ -351,7 +361,7 @@ export class Sim {
     this.stats[b.side].beamsLost++;
     const i = b.a, j = b.b;
     this.events.push({
-      type: 'break', cause, side: b.side, beam: bi, bpId: b.bpId, mat: b.matId,
+      type: 'break', cause, side: b.side, beam: bi, bpId: b.bpId, bpIds: b.bpIds, mat: b.matId,
       x1: this.x[i], y1: this.y[i], x2: this.x[j], y2: this.y[j],
       vx1: this.vx[i], vy1: this.vy[i], vx2: this.vx[j], vy2: this.vy[j],
     });
@@ -371,7 +381,7 @@ export class Sim {
       // 跟着节点沉没的杆件：计入损失，并发一个 cause='sunk' 的事件（画面和音效不需要为它做什么）
       this.stats[b.side].beamsLost++;
       this.events.push({
-        type: 'break', cause: 'sunk', side: b.side, beam: b.idx, bpId: b.bpId, mat: b.matId,
+        type: 'break', cause: 'sunk', side: b.side, beam: b.idx, bpId: b.bpId, bpIds: b.bpIds, mat: b.matId,
         x1: this.x[b.a], y1: this.y[b.a], x2: this.x[b.b], y2: this.y[b.b],
         vx1: this.vx[b.a], vy1: this.vy[b.a], vx2: this.vx[b.b], vy2: this.vy[b.b],
       });
@@ -400,12 +410,41 @@ export class Sim {
     const cx = this.x[i], cy = this.y[i];
     this.events.push({ type: 'coreDestroyed', side: core.side, x: cx, y: cy });
     // 核心殉爆：重创周围结构
-    this._blast(cx, cy, null, 220, 4.2, CFG.shell.impulse * 2.2, 5.0);
+    this._blast(cx, cy, null, 220, 4.2, CFG.shell.impulse * 2.2, 5.0, null, null, this.R.blastOcclusion);
     this._refreshAround(i);
   }
 
-  /** 爆炸对杆件 / 节点 / 装置的作用。directBeam 已单独结算过直击伤害 */
-  _blast(ex, ey, directBeam, dmg0, R, imp, IR, skipCore = null, skipCannon = null) {
+  /** 爆点 (ex,ey) 到目标点 (tx,ty) 之间有没有别的杆件挡着。绳索太细不算；skip 是目标自己 */
+  _blocked(ex, ey, tx, ty, skip) {
+    const rx = tx - ex, ry = ty - ey;
+    if (rx * rx + ry * ry < 0.12) return false;   // 贴脸的距离谈不上遮挡
+    const x = this.x, y = this.y, beams = this.beams;
+    for (let k = 0; k < beams.length; k++) {
+      const b = beams[k];
+      if (!b.alive || b === skip || b.tensionOnly) continue;
+      const ax = x[b.a], ay = y[b.a], sx = x[b.b] - ax, sy = y[b.b] - ay;
+      const den = rx * sy - ry * sx;
+      if (den > -1e-9 && den < 1e-9) {
+        // 平行。只有恰好躺在这条射线上的杆才可能挡：看它在射线上占的那一段是否落在中间
+        if (Math.abs((ax - ex) * ry - (ay - ey) * rx) > 1e-6) continue;
+        const rr = rx * rx + ry * ry;
+        const t0 = ((ax - ex) * rx + (ay - ey) * ry) / rr, t1 = ((ax + sx - ex) * rx + (ay + sy - ey) * ry) / rr;
+        if (Math.min(0.96, Math.max(t0, t1)) - Math.max(0.04, Math.min(t0, t1)) > 1e-6) return true;
+        continue;
+      }
+      const t = ((ax - ex) * sy - (ay - ey) * sx) / den;   // 沿爆点→目标
+      if (t <= 0.04 || t >= 0.96) continue;                 // 两头留一点余量：共用节点的邻杆不算挡
+      const u = ((ax - ex) * ry - (ay - ey) * rx) / den;   // 沿挡路的杆
+      if (u >= 0 && u <= 1) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 爆炸对杆件 / 节点 / 装置的作用。directBeam 已单独结算过直击伤害。
+   * occlude=true 时，被别的杆件挡住的目标不吃溅射伤害（冲击波照常推动节点）。
+   */
+  _blast(ex, ey, directBeam, dmg0, R, imp, IR, skipCore = null, skipCannon = null, occlude = false) {
     const x = this.x, y = this.y, vx = this.vx, vy = this.vy, w = this.w, alive = this.alive;
     const beams = this.beams;
     const dead = [];
@@ -419,8 +458,10 @@ export class Sim {
       const l2 = sx * sx + sy * sy;
       let t = l2 > 0 ? ((ex - ax) * sx + (ey - ay) * sy) / l2 : 0;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
-      const d = Math.hypot(ex - (ax + sx * t), ey - (ay + sy * t));
+      const cx = ax + sx * t, cy = ay + sy * t;
+      const d = Math.hypot(ex - cx, ey - cy);
       if (d >= R) continue;
+      if (occlude && this._blocked(ex, ey, cx, cy, b)) continue;
       const f = 1 - d / R;
       b.hp -= dmg0 * f * f;
       if (b.hp <= 0) dead.push(k);
@@ -437,15 +478,19 @@ export class Sim {
     }
     for (const c of this.cannons) {
       if (!c.alive || c === skipCannon) continue;
-      const d = Math.max(0, Math.hypot(c.px - ex, c.py - ey) - CANNON.radius);
+      const dc = Math.hypot(c.px - ex, c.py - ey);
+      const d = Math.max(0, dc - CANNON.radius);
       if (d >= R) continue;
+      if (occlude && d > 0 && this._blocked(ex, ey, ex + (c.px - ex) * d / dc, ey + (c.py - ey) * d / dc, null)) continue;
       const f = 1 - d / R;
       this._damageCannon(c, dmg0 * f * f);
     }
     for (const core of this.cores) {
       if (!core || !core.alive || core === skipCore) continue;
-      const d = Math.max(0, Math.hypot(x[core.node] - ex, y[core.node] - ey) - CORE.radius);
+      const dk = Math.hypot(x[core.node] - ex, y[core.node] - ey);
+      const d = Math.max(0, dk - CORE.radius);
       if (d >= R) continue;
+      if (occlude && d > 0 && this._blocked(ex, ey, ex + (x[core.node] - ex) * d / dk, ey + (y[core.node] - ey) * d / dk, null)) continue;
       const f = 1 - d / R;
       this._damageCore(core, dmg0 * f * f);
     }
@@ -475,9 +520,17 @@ export class Sim {
       this._poseCannon(c);
       if (c.recoil > 0) c.recoil = Math.max(0, c.recoil - dt * 2.4);
       if (c.py < CFG.waterY) { this._killCannon(c, 'sunk'); continue; }
+      if (!this.R.groundMounts) {
+        const mb = this.beams[c.beam];
+        // 炮座的任一端，或者杆件中段（悬在崖边、搭在崖角上的情况）碰着地形，都算贴地
+        c.grounded = this.contact[mb.a] !== 0 || this.contact[mb.b] !== 0 || mb.touch;
+      }
       if (this.phase !== 'fight') continue;
       c.cool -= dt;
-      if (c.cool <= 0) { this._fire(c); c.cool += CANNON.interval; }
+      if (c.cool <= 0) {
+        if (c.grounded) c.cool = 0;   // 炮座贴地：扣着不发，离地后立刻恢复
+        else { this._fire(c); c.cool += CANNON.interval; }
+      }
     }
   }
 
@@ -494,6 +547,8 @@ export class Sim {
       ox: c.px + dx * CANNON.barrelLen, oy: c.py + dy * CANNON.barrelLen,
       vx: dx * S.speed + mvx, vy: dy * S.speed + mvy,
       age: 0, alive: true,
+      dmg: S.directDamage,   // 这发炮弹还剩多少直击伤害可用（规则开启穿透时会被沿途的杆件逐步用掉）
+      scored: false,         // 是否已经计过一次「命中」
     });
     // 后坐：冲量 P = -J·dir 作用在炮耳轴上（高出杆件 pivotH），
     // 静力等效分到两个端点：切向各半，法向带一个力偶 —— 所以平射时后脚压、前脚抬。
@@ -562,20 +617,46 @@ export class Sim {
         let t = l2 > 0 ? ((sx - ax) * ex + (sy - ay) * ey) / l2 : 0;
         t = t < 0 ? 0 : t > 1 ? 1 : t;
         const dx = sx - (ax + ex * t), dy = sy - (ay + ey * t);
-        if (dx * dx + dy * dy < r * r) { this._explode(s, b, null, null, b.matId); break; }
+        if (dx * dx + dy * dy < r * r) {
+          if (this._hitBeam(s, b)) break;   // 炮弹停在了这根杆上（引爆）
+          // 否则：这根杆被打断，炮弹带着剩余伤害继续飞（本子步接着检查后面的杆件）
+        }
       }
     }
     if (anyDead && (this._sub % 24) === 0) this.shells = this.shells.filter(s => s.alive);
   }
 
+  /**
+   * 炮弹碰到一根杆。不开穿透时直接引爆。开了穿透：
+   * 杆件的耐久吃得下这一发（剩余耐久 >= 炮弹剩余伤害），就在这里引爆；吃不下，杆件被打断，炮弹按用掉的份额减速，带着剩下的伤害继续飞。
+   * 伤害预算按动能算，所以速度按剩余份额的平方根缩；交给杆件的动量就是炮弹减掉的那部分，一发炮弹的冲量不会被重复使用。
+   * @returns {boolean} 炮弹是否停在了这根杆上
+   */
+  _hitBeam(s, b) {
+    if (!this.R.pierce || b.hp >= s.dmg) { this._explode(s, b, null, null, b.matId); return true; }
+    const S = CFG.shell;
+    const k = Math.sqrt((s.dmg - b.hp) / s.dmg);
+    const px = S.mass * s.vx * (1 - k) * 0.5, py = S.mass * s.vy * (1 - k) * 0.5;
+    const i = b.a, j = b.b;
+    this.vx[i] += px * this.w[i]; this.vy[i] += py * this.w[i];
+    this.vx[j] += px * this.w[j]; this.vy[j] += py * this.w[j];
+    s.dmg -= b.hp; s.vx *= k; s.vy *= k;
+    b.hp = 0;
+    if (b.side !== s.side && !s.scored) { this.stats[s.side].hits++; s.scored = true; }
+    this.events.push({ type: 'pierce', x: s.x, y: s.y, kind: b.matId, side: s.side, cannon: s.cannon, hitSide: b.side });
+    this._breakBeam(b.idx, 'blast');
+    return false;
+  }
+
   _explode(s, beam, core, cannon, kind) {
     const S = CFG.shell;
+    const direct = this.R.pierce ? s.dmg : S.directDamage;
     s.alive = false;
     const hitSide = beam ? beam.side : core ? core.side : cannon ? cannon.side : -1;
-    if (hitSide >= 0 && hitSide !== s.side) this.stats[s.side].hits++;
+    if (hitSide >= 0 && hitSide !== s.side && !s.scored) { this.stats[s.side].hits++; s.scored = true; }
     this.events.push({ type: 'explode', x: s.x, y: s.y, kind, side: s.side, cannon: s.cannon, hitSide, vx: s.vx, vy: s.vy });
     if (beam) {
-      beam.hp -= S.directDamage;
+      beam.hp -= direct;
       // 炮弹动量传给被击中杆件的两个端点
       const i = beam.a, j = beam.b;
       const px = S.mass * s.vx * 0.5, py = S.mass * s.vy * 0.5;
@@ -596,9 +677,9 @@ export class Sim {
       }
     }
     // 先结算溅射，再结算直击（直击目标不重复吃溅射）
-    this._blast(s.x, s.y, beam, S.blastDamage, S.blastRadius, S.impulse, S.impulseRadius, core, cannon);
-    if (core) this._damageCore(core, S.directDamage);
-    if (cannon) this._damageCannon(cannon, S.directDamage);
+    this._blast(s.x, s.y, beam, S.blastDamage, S.blastRadius, S.impulse, S.impulseRadius, core, cannon, this.R.blastOcclusion);
+    if (core) this._damageCore(core, direct);
+    if (cannon) this._damageCannon(cannon, direct);
   }
 
   // ------------------------------------------------------------------ 帧末：显示量与胜负
@@ -630,9 +711,9 @@ export class Sim {
     }
     if (this.phase !== 'fight') return;
     this.fightTime += dt;
-    if (this.fightTime >= CFG.battleTime) { this._endByHp('timeout'); return; }
+    if (this.fightTime >= this.R.battleTime) { this._endByHp('timeout'); return; }
     let armed = false;
-    for (const c of this.cannons) if (c.alive) { armed = true; break; }
+    for (const c of this.cannons) if (c.alive && !c.grounded) { armed = true; break; }
     let flying = false;
     for (const s of this.shells) if (s.alive) { flying = true; break; }
     if (!armed && !flying) {
@@ -643,7 +724,10 @@ export class Sim {
 
   _endByHp(reason) {
     const p = this.cores[0].hp, e = this.cores[1].hp;
-    this._end(Math.abs(p - e) < 1e-6 ? 'draw' : p > e ? 'player' : 'enemy', reason);
+    // 差距在规则给的幅度以内算平局（旧规则幅度为 0，只有完全相等才平）
+    const margin = this.R.drawMargin * this.cores[0].hpMax;
+    const tie = margin > 0 ? Math.abs(p - e) <= margin : Math.abs(p - e) < 1e-6;
+    this._end(tie ? 'draw' : p > e ? 'player' : 'enemy', reason);
   }
 
   _end(winner, reason) {
@@ -656,7 +740,7 @@ export class Sim {
 
   // ------------------------------------------------------------------ 工具
   /** 剩余交火时间（秒） */
-  get timeLeft() { return Math.max(0, CFG.battleTime - this.fightTime); }
+  get timeLeft() { return Math.max(0, this.R.battleTime - this.fightTime); }
 
   /** 状态指纹（确定性测试用） */
   hash() {

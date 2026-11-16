@@ -2,7 +2,8 @@
 // 每条断言的消息都以「目标 N」开头，对应 src/sim/forts.js 顶部写的平衡目标。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CFG } from '../src/config.js';
+import { CFG, CANNON } from '../src/config.js';
+import { getRules } from '../src/rules.js';
 import { Blueprint } from '../src/sim/blueprint.js';
 import { Sim } from '../src/sim/sim.js';
 import { predictShot } from '../src/sim/ballistics.js';
@@ -65,19 +66,25 @@ test('目标 1 敌方堡垒：一门高位平射炮 + 一门高抛炮，都打�
   assert.ok(lob, '目标 1 敌方缺少高抛炮（射角 > 45°）');
 });
 
-test('目标 1 敌方堡垒：无人还击连开 90 秒，不被自己的后坐震断', () => {
+test('目标 1 敌方堡垒：无人还击连开完整时限，不被自己的后坐震断', () => {
   // 玩家一侧只有一个钉死、打不坏的核心：敌方一直开火到时限
   const sim = new Sim(new Blueprint('player'), makeEnemyFort(), { seed: CFG.seed });
   const ci = sim.cores[0].node;
   sim.fixed[ci] = 1; sim.w[ci] = 0; sim.cores[0].hp = Infinity;
   let tilt = 0, ownHits = 0;
-  for (let f = 0; f < 60 * (CFG.settleTime + 90 + 1); f++) {
+  // v2 时限从 90 秒延长到 120 秒：必须覆盖完整交火期，不能只验旧规则的前 90 秒。
+  const battleTime = getRules().battleTime;
+  for (let f = 0; f < 60 * (CFG.settleTime + battleTime + 1); f++) {
     sim.step();
     for (const e of sim.events) if (e.type === 'explode' && e.side === 1 && e.hitSide === 1) ownHits++;
     sim.events.length = 0;
     if (sim.phase === 'fight') for (const c of sim.cannons) if (c.alive && c.side === 1) tilt = Math.max(tilt, Math.abs(c.tilt) * DEG);
   }
-  assert.ok(sim.stats[1].shots >= 40, `目标 1 90 秒里应开火 40 发以上，实际 ${sim.stats[1].shots}`);
+  // 原来的 40 发下限只对应旧时限；按最晚首发的炮计算每门应有的完整轮数，v2 两门共 60 发。
+  const gunCount = sim.cannons.filter(c => c.side === 1).length;
+  const lastFirstShot = CANNON.firstDelay + CANNON.enemyOffset + (gunCount - 1) * CANNON.stagger;
+  const minShots = gunCount * (Math.floor((battleTime - lastFirstShot) / CANNON.interval) + 1);
+  assert.ok(sim.stats[1].shots >= minShots, `目标 1 ${battleTime} 秒里应开火至少 ${minShots} 发，实际 ${sim.stats[1].shots}`);
   assert.equal(ownHits, 0, `目标 1 敌方炮弹打中自家结构 ${ownHits} 次`);
   assert.equal(sim.stats[1].beamsLost, 0, `目标 1 敌方被自己的后坐震断 ${sim.stats[1].beamsLost} 根杆`);
   assert.equal(sim.stats[1].cannonsLost, 0, '目标 1 敌方无故丢炮');

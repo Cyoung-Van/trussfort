@@ -14,8 +14,10 @@ function beamOf(sim, bp, a, b) {
 }
 
 // 支架：锚点 A0(0,0)、F2(0,-2)，外伸节点 T(2,0)；A0-T 水平杆，F2-T 斜撑；A0-T 上架一门炮。
+// 这个形状有手算的解析解，所以拿它校验求解器。炮座一端是锚点，只有 v1 规则允许，
+// 这几条测试因此按 v1 建图（求解器本身不分版本）。
 function bracket() {
-  const bp = new Blueprint('player');
+  const bp = new Blueprint('player', 'v1');
   const A0 = bp.nodeAt(0, 0).id, F2 = bp.nodeAt(0, -2).id;
   const T = bp.addNode(2, 0).id;
   bp.addBeam(A0, T, 'wood'); bp.addBeam(F2, T, 'wood');
@@ -125,11 +127,18 @@ test('蓝图：造价、退款、校验', () => {
   const a = bp.nodeAt(0, 0).id;
   const n = bp.addNode(2, 0); assert.ok(n.ok);
   const r = bp.addBeam(a, n.id, 'wood'); assert.ok(r.ok);
-  assert.equal(bp.cost(), 200);
-  assert.ok(bp.setBeamMat(r.id, 'steel').ok); assert.equal(bp.cost(), 480);
-  assert.ok(bp.addCannon(r.id).ok); assert.equal(bp.cost(), 480 + CANNON.cost);
-  assert.ok(!bp.setBeamMat(r.id, 'rope').ok, '有炮的杆不能换成绳');
-  assert.ok(bp.removeBeam(r.id).ok); assert.equal(bp.cost(), 0, '拆除全额退款，炮一并退');
+  const fee = bp.rules.assemblyFee;
+  assert.equal(bp.cost(), 200 + fee, '2 米木杆 + 一份装配费');
+  assert.ok(bp.setBeamMat(r.id, 'steel').ok); assert.equal(bp.cost(), 480 + fee);
+  assert.ok(!bp.addCannon(r.id).ok, '一端是锚点的杆不能架炮');
+  // 抬高一层再架炮：(1,2)-(3,2) 两端都不是锚点，也不贴地
+  const p = bp.addNode(1, 2).id, q = bp.addNode(3, 2).id;
+  const m = bp.addBeam(p, q, 'steel'); assert.ok(m.ok);
+  const before = bp.cost();
+  assert.ok(bp.addCannon(m.id).ok); assert.equal(bp.cost(), before + CANNON.cost);
+  assert.ok(!bp.setBeamMat(m.id, 'rope').ok, '有炮的杆不能换成绳');
+  assert.ok(bp.removeBeam(m.id).ok); assert.equal(bp.cost(), 480 + fee, '拆除全额退款，炮一并退');
+  assert.ok(bp.removeBeam(r.id).ok); assert.equal(bp.cost(), 0);
   assert.equal(bp.nodeAt(2, 0), null, '孤立节点自动清理');
   assert.ok(!bp.addNode(-2, -2).ok, '山体里不能放节点');
   assert.ok(!bp.addNode(20, 0).ok, '建造区外不能放节点');

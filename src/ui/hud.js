@@ -4,6 +4,7 @@
 import { CFG, MATERIALS, MATERIAL_ORDER, CANNON } from '../config.js';
 import { THEME, stressRGB } from '../theme.js';
 import { ICON, SWATCH } from './icons.js';
+import { getRules } from '../rules.js';
 
 const HINT_KEY = 'trussfort.hint.v1';
 const ROLL_MS = 260;
@@ -13,13 +14,14 @@ const ARM_MS = 2000;
 const SPEEDS = [0.25, 1, 2, 4];
 
 const BREAKDOWN_ROWS = [
-  ['wood', '木杆'], ['steel', '钢梁'], ['rope', '绳索'], ['spring', '弹簧'], ['cannon', '火炮'],
+  ['wood', '木杆'], ['steel', '钢梁'], ['rope', '绳索'], ['spring', '弹簧'], ['assembly', '装配'], ['cannon', '火炮'],
 ];
 
 const HELP_LINES = [
   '从锚点或已有节点拖出杆件',
   '单击节点可连续搭建',
   '右键或拆除工具删除（全额退款）',
+  '火炮要架在自己搭的结构上：炮座不能接锚点，也不能贴地',
   '拖动炮管调整射角',
   '滚轮缩放，空格或中键拖动平移',
   'Ctrl/Cmd+Z 撤销',
@@ -276,7 +278,7 @@ export class Hud {
     const mid = el('div', 'duel-mid', duel);
     // DOM 顺序：我方 / 中间 / 敌方
     duel.insertBefore(mid, this.sides[1].side);
-    this.timerEl = el('div', 'timer', mid, clock(CFG.battleTime));
+    this.timerEl = el('div', 'timer', mid, clock(getRules().battleTime));
     // 观战回放时的场次说明（对决条下方）
     this.specCap = el('div', 'panel spec-cap', L, '');
 

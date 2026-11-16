@@ -3,11 +3,14 @@
 // 坐标一律是己方本地坐标（朝 +x 开火），敌方在进入世界时镜像。
 
 import { CFG, MATERIALS, CANNON } from '../config.js';
+import { getRules } from '../rules.js';
 
 const EPS = 1e-6;
 const DEG = Math.PI / 180;
 
 export function insideCliffLocal(x, y) { return x < -EPS && y < -EPS; }
+/** 这个点是不是贴在地形表面上（崖顶面 y=0、x<=0，或崖壁 x=0、y<=0） */
+export function onGroundLocal(x, y) { return (Math.abs(y) < 1e-4 && x < 1e-4) || (Math.abs(x) < 1e-4 && y < 1e-4); }
 
 // 线段是否穿过山体内部（开区域 x<0 且 y<0）。精确解：先求线段落在 x<0 一侧的参数区间，再看这段里 y 的最小值
 function segCrossesCliff(x1, y1, x2, y2) {
@@ -32,8 +35,10 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const hasMat = (m) => typeof m === 'string' && Object.prototype.hasOwnProperty.call(MATERIALS, m);
 
 export class Blueprint {
-  constructor(side = 'player') {
+  /** @param rules 规则版本号或规则对象，不传就是当前版本（见 rules.js）。决定炮座规则和计价方式 */
+  constructor(side = 'player', rules) {
     this.side = side;
+    this.rules = getRules(rules);
     this.nodes = new Map();   // id → {id, x, y, kind: 'free' | 'anchor' | 'core'}
     this.beams = new Map();   // id → {id, a, b, mat}
     this.cannons = new Map(); // id → {id, beam, angle}（弧度，本地坐标，0 = 水平朝敌方）
@@ -82,21 +87,79 @@ export class Blueprint {
     const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
     return Math.hypot(b.x - a.x, b.y - a.y);
   }
+  /** 一根杆的材料费（不含装配费） */
   beamCost(bm) { return Math.round(MATERIALS[bm.mat].cost * this.beamLength(bm)); }
-  /** 两点间用某种材料造一根杆的价格（编辑器拖拽预览用） */
+  /** 两点间用某种材料新造一根杆的价格，含装配费（编辑器拖拽预览用，按当前规则） */
   static priceFor(mat, x1, y1, x2, y2) {
-    return Math.round(MATERIALS[mat].cost * Math.hypot(x2 - x1, y2 - y1));
+    return Math.round(MATERIALS[mat].cost * Math.hypot(x2 - x1, y2 - y1)) + getRules().assemblyFee;
+  }
+  /** 装配费：每根「构件」收一次。共线合并后的几段算一根构件 */
+  assemblyCost() {
+    const fee = this.rules.assemblyFee;
+    return fee ? fee * this.mergeGroups().length : 0;
   }
   cost() {
     let c = 0;
     for (const bm of this.beams.values()) c += this.beamCost(bm);
+    c += this.assemblyCost();
     c += this.cannons.size * CANNON.cost;
     return c;
   }
   breakdown() {
-    const out = { wood: 0, steel: 0, rope: 0, spring: 0, cannon: this.cannons.size * CANNON.cost };
+    const out = { wood: 0, steel: 0, rope: 0, spring: 0, assembly: this.assemblyCost(), cannon: this.cannons.size * CANNON.cost };
     for (const bm of this.beams.values()) out[bm.mat] += this.beamCost(bm);
     return out;
+  }
+
+  /**
+   * 把蓝图里的杆件归并成「构件」：同材质、共线、中间那个节点没有别的连接也没有装置、
+   * 合并后不超过该材料的最长限制的相邻杆件，算作一根构件（计价只收一次装配费，模拟里是一根杆、一份耐久）。
+   * 这样把一根直杆切成几段既不会多收钱，也不会白得好几份耐久。规则不要求合并时，每根杆自己是一根构件。
+   * @returns {{ids:number[], a:number, b:number, mat:string, len:number}[]} a、b 是构件两端的节点 id
+   */
+  mergeGroups(rules = this.rules) {
+    const of = new Map();
+    for (const bm of this.beams.values()) of.set(bm.id, { ids: [bm.id], a: bm.a, b: bm.b, mat: bm.mat, len: this.beamLength(bm) });
+    if (rules.mergeCollinear) {
+      // 按位置排好再处理，结果不依赖搭建先后
+      const mids = [...this.nodes.values()].filter((n) => n.kind === 'free').sort((p, q) => p.x - q.x || p.y - q.y);
+      for (const n of mids) {
+        const bs = this.beamsOf(n.id);
+        if (bs.length !== 2) continue;
+        const [b1, b2] = bs;
+        if (b1.mat !== b2.mat || this.cannonOn(b1.id) || this.cannonOn(b2.id)) continue;
+        const g1 = of.get(b1.id), g2 = of.get(b2.id);
+        if (g1 === g2) continue;
+        const e1 = g1.a === n.id ? g1.b : g1.a, e2 = g2.a === n.id ? g2.b : g2.a;
+        const p1 = this.nodes.get(e1), p2 = this.nodes.get(e2);
+        const ux = p1.x - n.x, uy = p1.y - n.y, vx = p2.x - n.x, vy = p2.y - n.y;
+        if (Math.abs(ux * vy - uy * vx) > 1e-6 || ux * vx + uy * vy >= 0) continue;   // 不共线，或者折回去了
+        if (g1.len + g2.len > MATERIALS[b1.mat].maxLen + 1e-4) continue;
+        const g = { ids: [...g1.ids, ...g2.ids], a: e1, b: e2, mat: b1.mat, len: g1.len + g2.len };
+        for (const id of g.ids) of.set(id, g);
+      }
+    }
+    return [...new Set(of.values())];
+  }
+
+  /**
+   * 线段 (x1,y1)-(x2,y2) 是否和某根已有杆件有一段叠在同一条线上（只共用一个端点不算）。
+   * skip 是要忽略的杆件 id 集合。返回叠上的那根杆，或 null。
+   */
+  _overlapping(x1, y1, x2, y2, skip) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const L = Math.hypot(dx, dy);
+    if (L < 1e-9) return null;
+    const ux = dx / L, uy = dy / L;
+    for (const bm of this.beams.values()) {
+      if (skip && skip.has(bm.id)) continue;
+      const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
+      // 两个端点都在这条直线上才算共线
+      if (Math.abs((a.x - x1) * uy - (a.y - y1) * ux) > 1e-6 || Math.abs((b.x - x1) * uy - (b.y - y1) * ux) > 1e-6) continue;
+      const ta = (a.x - x1) * ux + (a.y - y1) * uy, tb = (b.x - x1) * ux + (b.y - y1) * uy;
+      if (Math.min(L, Math.max(ta, tb)) - Math.max(0, Math.min(ta, tb)) > 1e-6) return bm;
+    }
+    return null;
   }
 
   // ---------- 校验 ----------
@@ -127,6 +190,13 @@ export class Blueprint {
     if (slope > CANNON.maxSlopeDeg + 1e-4) return '炮座杆件太陡';
     return null;
   }
+  /** 炮座两端的位置规则：后坐力必须由自己搭的结构承担，不能直接交给锚点或地面。ka、kb 是两端节点的类型 */
+  _checkCannonEnds(ka, x1, y1, kb, x2, y2) {
+    const R = this.rules;
+    if (!R.anchorMounts && (ka === 'anchor' || kb === 'anchor')) return '炮座不能接在锚点上';
+    if (!R.groundMounts && (onGroundLocal(x1, y1) || onGroundLocal(x2, y2))) return '炮座不能贴着地面';
+    return null;
+  }
 
   /** 这根杆上能不能架炮。返回 null 或原因（不检查数量上限时传 ignoreLimit=true） */
   checkCannonMount(beamId, ignoreLimit = false) {
@@ -135,7 +205,7 @@ export class Blueprint {
     if (this.cannonOn(beamId)) return '这根杆上已经有火炮';
     if (!ignoreLimit && this.cannons.size >= CFG.maxCannons) return `最多 ${CFG.maxCannons} 门火炮`;
     const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
-    return this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y);
+    return this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
   }
 
   // ---------- 修改（都返回 {ok, id?, reason?}） ----------
@@ -155,6 +225,7 @@ export class Blueprint {
     if (this.beamBetween(a, b)) return { ok: false, reason: '这里已经有杆件' };
     const why = this.checkSpan(mat, na.x, na.y, nb.x, nb.y);
     if (why) return { ok: false, reason: why };
+    if (this.rules.noOverlap && this._overlapping(na.x, na.y, nb.x, nb.y)) return { ok: false, reason: '和已有杆件重叠' };
     const id = this._next++;
     this.beams.set(id, { id, a, b, mat });
     return { ok: true, id };
@@ -205,9 +276,21 @@ export class Blueprint {
       const w2 = this.checkSpan(bm.mat, x, y, o.x, o.y);
       if (w2) return { ok: false, reason: w2 };
       if (this.cannonOn(bm.id)) {
-        const w3 = this._checkCannonBeam(bm.mat, x, y, o.x, o.y);
+        const w3 = this._checkCannonBeam(bm.mat, x, y, o.x, o.y) || this._checkCannonEnds(n.kind, x, y, o.kind, o.x, o.y);
         if (w3) return { ok: false, reason: w3 };
       }
+    }
+    if (this.rules.noOverlap) {
+      // 拖动后相连的杆件不能和别的杆叠到一条线上（包括同一个节点上的两根杆被拖成同向）
+      const ox = n.x, oy = n.y;
+      n.x = x; n.y = y;
+      let clash = false;
+      for (const bm of this.beamsOf(id)) {
+        const o = this.nodes.get(bm.a === id ? bm.b : bm.a);
+        if (this._overlapping(x, y, o.x, o.y, new Set([bm.id]))) { clash = true; break; }
+      }
+      if (clash) { n.x = ox; n.y = oy; return { ok: false, reason: '和已有杆件重叠' }; }
+      return { ok: true };
     }
     n.x = x; n.y = y;
     return { ok: true };
@@ -233,11 +316,25 @@ export class Blueprint {
     if (this.cannonOn(beamId)) return { ok: false, reason: '这根杆上已经有火炮' };
     if (this.cannons.size >= CFG.maxCannons) return { ok: false, reason: `最多 ${CFG.maxCannons} 门火炮` };
     const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
-    const why = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y);
+    const why = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
     if (why) return { ok: false, reason: why };
     const id = this._next++;
     this.cannons.set(id, { id, beam: beamId, angle: clampAngle(angle) });
     return { ok: true, id };
+  }
+  /**
+   * 拆掉不符合当前炮座规则的火炮（读取旧规则下保存的蓝图时用），返回拆掉的数量。
+   * 只动火炮，杆件原样保留。
+   */
+  dropIllegalCannons() {
+    let n = 0;
+    for (const c of [...this.cannons.values()]) {
+      const bm = this.beams.get(c.beam);
+      const a = bm && this.nodes.get(bm.a), b = bm && this.nodes.get(bm.b);
+      if (!a || !b) continue;   // 数据本身坏了，交给 validate 去报
+      if (this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y)) { this.cannons.delete(c.id); n++; }
+    }
+    return n;
   }
   removeCannon(id) {
     if (!this.cannons.has(id)) return { ok: false, reason: '火炮不存在' };
@@ -269,8 +366,8 @@ export class Blueprint {
       cannons: [...this.cannons.values()].map(c => [c.id, c.beam, +(c.angle / DEG).toFixed(3)]),
     };
   }
-  static fromJSON(o, side = 'player') {
-    const bp = new Blueprint(side);
+  static fromJSON(o, side = 'player', rules) {
+    const bp = new Blueprint(side, rules);
     bp.nodes.clear(); bp.beams.clear(); bp.cannons.clear();
     for (const [id, x, y, kind] of o.nodes) bp.nodes.set(id, { id, x, y, kind });
     for (const [id, a, b, mat] of o.beams) bp.beams.set(id, { id, a, b, mat });
@@ -278,7 +375,7 @@ export class Blueprint {
     bp._next = o.next;
     return bp;
   }
-  clone(side = this.side) { return Blueprint.fromJSON(this.toJSON(), side); }
+  clone(side = this.side) { return Blueprint.fromJSON(this.toJSON(), side, this.rules); }
 
   /**
    * 完整性检查（读取存档后用）：锚点和核心齐全且在原位、节点不重叠且位置合法、
@@ -315,6 +412,7 @@ export class Blueprint {
       pairs.add(pk);
       const w = this.checkSpan(bm.mat, a.x, a.y, b.x, b.y);
       if (w) return w;
+      if (this.rules.noOverlap && this._overlapping(a.x, a.y, b.x, b.y, new Set([bm.id]))) return '有杆件重叠';
     }
     if (this.cannons.size > CFG.maxCannons) return '火炮太多';
     const mounts = new Set();
@@ -325,7 +423,7 @@ export class Blueprint {
       if (!bm || mounts.has(c.beam) || !isNum(c.angle)) return '火炮无效';
       mounts.add(c.beam);
       const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
-      const w = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y);
+      const w = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
       if (w) return w;
       c.angle = clampAngle(c.angle);
     }
@@ -351,8 +449,8 @@ export class Blueprint {
    *   cannons: [[名字A, 名字B, 射角度数], ...]
    * 任何一步不合法都抛错，保证预设数据不会悄悄坏掉。
    */
-  static build(spec, side = 'player') {
-    const bp = new Blueprint(side);
+  static build(spec, side = 'player', rules) {
+    const bp = new Blueprint(side, rules);
     const ids = {};
     for (const [name, [x, y]] of Object.entries(spec.nodes)) {
       const r = bp.addNode(x, y);

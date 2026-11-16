@@ -264,11 +264,67 @@
     }
   };
 
+  // src/rules.js
+  var RULESETS = {
+    // v1：2026-11-15、16 两场模型对抗赛用的规则
+    v1: {
+      id: "v1",
+      anchorMounts: true,
+      // 火炮可以架在锚点上
+      groundMounts: true,
+      // 炮座贴着地面也能开火
+      pierce: false,
+      // 炮弹碰到第一根杆就完整引爆
+      blastOcclusion: false,
+      // 溅射只看距离
+      assemblyFee: 0,
+      // 每根杆的装配费
+      mergeCollinear: false,
+      // 同材质共线的杆不合并
+      noOverlap: false,
+      // 允许两根杆叠在同一条线上
+      battleTime: 90,
+      // 交火时限（秒）
+      drawMargin: 0,
+      // 超时判定：核心耐久相差不超过「上限 × 这个比例」算平局
+      needCannon: false
+      // 参赛堡垒必须至少有一门能开火的炮
+    },
+    // v2：2026-11-16 起。把「材料、结构、火力」连起来的第一批修正
+    v2: {
+      id: "v2",
+      anchorMounts: false,
+      // 炮座两端都不能是锚点：后坐力必须由自己搭的结构承担
+      groundMounts: false,
+      // 炮座不能贴地：建造时不许放在地面上，战斗中炮座节点触地的炮不能开火
+      pierce: true,
+      // 炮弹带着一份伤害预算：打断一根杆后，剩下的伤害和动量继续往前飞
+      blastOcclusion: true,
+      // 溅射会被中间的杆件挡住（绳索太细，不算）
+      assemblyFee: 20,
+      mergeCollinear: true,
+      // 把一根直杆切成几段不再白得耐久：同材质、共线、中间节点没有别的连接的，按一根算
+      noOverlap: true,
+      // 两根杆不能有一段叠在同一条线上（否则同一个位置能叠出好几份耐久和强度）
+      battleTime: 120,
+      drawMargin: 0.02,
+      needCannon: true
+    }
+  };
+  var CURRENT_RULES = "v2";
+  function getRules(r) {
+    if (r && typeof r === "object") return r;
+    return RULESETS[r] || RULESETS[CURRENT_RULES];
+  }
+
   // src/sim/blueprint.js
   var EPS = 1e-6;
   var DEG = Math.PI / 180;
   function insideCliffLocal(x, y) {
     return x < -EPS && y < -EPS;
+  }
+  function onGroundLocal(x, y) {
+    return Math.abs(y) < 1e-4 && x < 1e-4 || Math.abs(x) < 1e-4 && y < 1e-4;
   }
   function segCrossesCliff(x1, y1, x2, y2) {
     let t0 = 0, t1 = 1;
@@ -291,8 +347,10 @@
   var isNum = (v) => typeof v === "number" && Number.isFinite(v);
   var hasMat = (m) => typeof m === "string" && Object.prototype.hasOwnProperty.call(MATERIALS, m);
   var Blueprint = class _Blueprint {
-    constructor(side = "player") {
+    /** @param rules 规则版本号或规则对象，不传就是当前版本（见 rules.js）。决定炮座规则和计价方式 */
+    constructor(side = "player", rules2) {
       this.side = side;
+      this.rules = getRules(rules2);
       this.nodes = /* @__PURE__ */ new Map();
       this.beams = /* @__PURE__ */ new Map();
       this.cannons = /* @__PURE__ */ new Map();
@@ -343,23 +401,77 @@
       const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
       return Math.hypot(b.x - a.x, b.y - a.y);
     }
+    /** 一根杆的材料费（不含装配费） */
     beamCost(bm) {
       return Math.round(MATERIALS[bm.mat].cost * this.beamLength(bm));
     }
-    /** 两点间用某种材料造一根杆的价格（编辑器拖拽预览用） */
+    /** 两点间用某种材料新造一根杆的价格，含装配费（编辑器拖拽预览用，按当前规则） */
     static priceFor(mat2, x1, y1, x2, y2) {
-      return Math.round(MATERIALS[mat2].cost * Math.hypot(x2 - x1, y2 - y1));
+      return Math.round(MATERIALS[mat2].cost * Math.hypot(x2 - x1, y2 - y1)) + getRules().assemblyFee;
+    }
+    /** 装配费：每根「构件」收一次。共线合并后的几段算一根构件 */
+    assemblyCost() {
+      const fee = this.rules.assemblyFee;
+      return fee ? fee * this.mergeGroups().length : 0;
     }
     cost() {
       let c = 0;
       for (const bm of this.beams.values()) c += this.beamCost(bm);
+      c += this.assemblyCost();
       c += this.cannons.size * CANNON.cost;
       return c;
     }
     breakdown() {
-      const out = { wood: 0, steel: 0, rope: 0, spring: 0, cannon: this.cannons.size * CANNON.cost };
+      const out = { wood: 0, steel: 0, rope: 0, spring: 0, assembly: this.assemblyCost(), cannon: this.cannons.size * CANNON.cost };
       for (const bm of this.beams.values()) out[bm.mat] += this.beamCost(bm);
       return out;
+    }
+    /**
+     * 把蓝图里的杆件归并成「构件」：同材质、共线、中间那个节点没有别的连接也没有装置、
+     * 合并后不超过该材料的最长限制的相邻杆件，算作一根构件（计价只收一次装配费，模拟里是一根杆、一份耐久）。
+     * 这样把一根直杆切成几段既不会多收钱，也不会白得好几份耐久。规则不要求合并时，每根杆自己是一根构件。
+     * @returns {{ids:number[], a:number, b:number, mat:string, len:number}[]} a、b 是构件两端的节点 id
+     */
+    mergeGroups(rules2 = this.rules) {
+      const of = /* @__PURE__ */ new Map();
+      for (const bm of this.beams.values()) of.set(bm.id, { ids: [bm.id], a: bm.a, b: bm.b, mat: bm.mat, len: this.beamLength(bm) });
+      if (rules2.mergeCollinear) {
+        const mids = [...this.nodes.values()].filter((n) => n.kind === "free").sort((p, q) => p.x - q.x || p.y - q.y);
+        for (const n of mids) {
+          const bs = this.beamsOf(n.id);
+          if (bs.length !== 2) continue;
+          const [b1, b2] = bs;
+          if (b1.mat !== b2.mat || this.cannonOn(b1.id) || this.cannonOn(b2.id)) continue;
+          const g1 = of.get(b1.id), g2 = of.get(b2.id);
+          if (g1 === g2) continue;
+          const e1 = g1.a === n.id ? g1.b : g1.a, e2 = g2.a === n.id ? g2.b : g2.a;
+          const p1 = this.nodes.get(e1), p2 = this.nodes.get(e2);
+          const ux = p1.x - n.x, uy = p1.y - n.y, vx = p2.x - n.x, vy = p2.y - n.y;
+          if (Math.abs(ux * vy - uy * vx) > 1e-6 || ux * vx + uy * vy >= 0) continue;
+          if (g1.len + g2.len > MATERIALS[b1.mat].maxLen + 1e-4) continue;
+          const g = { ids: [...g1.ids, ...g2.ids], a: e1, b: e2, mat: b1.mat, len: g1.len + g2.len };
+          for (const id of g.ids) of.set(id, g);
+        }
+      }
+      return [...new Set(of.values())];
+    }
+    /**
+     * 线段 (x1,y1)-(x2,y2) 是否和某根已有杆件有一段叠在同一条线上（只共用一个端点不算）。
+     * skip 是要忽略的杆件 id 集合。返回叠上的那根杆，或 null。
+     */
+    _overlapping(x1, y1, x2, y2, skip) {
+      const dx = x2 - x1, dy = y2 - y1;
+      const L = Math.hypot(dx, dy);
+      if (L < 1e-9) return null;
+      const ux = dx / L, uy = dy / L;
+      for (const bm of this.beams.values()) {
+        if (skip && skip.has(bm.id)) continue;
+        const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
+        if (Math.abs((a.x - x1) * uy - (a.y - y1) * ux) > 1e-6 || Math.abs((b.x - x1) * uy - (b.y - y1) * ux) > 1e-6) continue;
+        const ta = (a.x - x1) * ux + (a.y - y1) * uy, tb = (b.x - x1) * ux + (b.y - y1) * uy;
+        if (Math.min(L, Math.max(ta, tb)) - Math.max(0, Math.min(ta, tb)) > 1e-6) return bm;
+      }
+      return null;
     }
     // ---------- 校验 ----------
     /** 返回 null 表示可放置，否则返回原因（给玩家看的中文短语） */
@@ -389,6 +501,13 @@
       if (slope > CANNON.maxSlopeDeg + 1e-4) return "\u70AE\u5EA7\u6746\u4EF6\u592A\u9661";
       return null;
     }
+    /** 炮座两端的位置规则：后坐力必须由自己搭的结构承担，不能直接交给锚点或地面。ka、kb 是两端节点的类型 */
+    _checkCannonEnds(ka, x1, y1, kb, x2, y2) {
+      const R2 = this.rules;
+      if (!R2.anchorMounts && (ka === "anchor" || kb === "anchor")) return "\u70AE\u5EA7\u4E0D\u80FD\u63A5\u5728\u951A\u70B9\u4E0A";
+      if (!R2.groundMounts && (onGroundLocal(x1, y1) || onGroundLocal(x2, y2))) return "\u70AE\u5EA7\u4E0D\u80FD\u8D34\u7740\u5730\u9762";
+      return null;
+    }
     /** 这根杆上能不能架炮。返回 null 或原因（不检查数量上限时传 ignoreLimit=true） */
     checkCannonMount(beamId, ignoreLimit = false) {
       const bm = this.beams.get(beamId);
@@ -396,7 +515,7 @@
       if (this.cannonOn(beamId)) return "\u8FD9\u6839\u6746\u4E0A\u5DF2\u7ECF\u6709\u706B\u70AE";
       if (!ignoreLimit && this.cannons.size >= CFG.maxCannons) return `\u6700\u591A ${CFG.maxCannons} \u95E8\u706B\u70AE`;
       const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
-      return this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y);
+      return this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
     }
     // ---------- 修改（都返回 {ok, id?, reason?}） ----------
     addNode(x, y) {
@@ -414,6 +533,7 @@
       if (this.beamBetween(a, b)) return { ok: false, reason: "\u8FD9\u91CC\u5DF2\u7ECF\u6709\u6746\u4EF6" };
       const why = this.checkSpan(mat2, na.x, na.y, nb.x, nb.y);
       if (why) return { ok: false, reason: why };
+      if (this.rules.noOverlap && this._overlapping(na.x, na.y, nb.x, nb.y)) return { ok: false, reason: "\u548C\u5DF2\u6709\u6746\u4EF6\u91CD\u53E0" };
       const id = this._next++;
       this.beams.set(id, { id, a, b, mat: mat2 });
       return { ok: true, id };
@@ -461,9 +581,28 @@
         const w2 = this.checkSpan(bm.mat, x, y, o.x, o.y);
         if (w2) return { ok: false, reason: w2 };
         if (this.cannonOn(bm.id)) {
-          const w3 = this._checkCannonBeam(bm.mat, x, y, o.x, o.y);
+          const w3 = this._checkCannonBeam(bm.mat, x, y, o.x, o.y) || this._checkCannonEnds(n.kind, x, y, o.kind, o.x, o.y);
           if (w3) return { ok: false, reason: w3 };
         }
+      }
+      if (this.rules.noOverlap) {
+        const ox = n.x, oy = n.y;
+        n.x = x;
+        n.y = y;
+        let clash = false;
+        for (const bm of this.beamsOf(id)) {
+          const o = this.nodes.get(bm.a === id ? bm.b : bm.a);
+          if (this._overlapping(x, y, o.x, o.y, /* @__PURE__ */ new Set([bm.id]))) {
+            clash = true;
+            break;
+          }
+        }
+        if (clash) {
+          n.x = ox;
+          n.y = oy;
+          return { ok: false, reason: "\u548C\u5DF2\u6709\u6746\u4EF6\u91CD\u53E0" };
+        }
+        return { ok: true };
       }
       n.x = x;
       n.y = y;
@@ -488,11 +627,28 @@
       if (this.cannonOn(beamId)) return { ok: false, reason: "\u8FD9\u6839\u6746\u4E0A\u5DF2\u7ECF\u6709\u706B\u70AE" };
       if (this.cannons.size >= CFG.maxCannons) return { ok: false, reason: `\u6700\u591A ${CFG.maxCannons} \u95E8\u706B\u70AE` };
       const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
-      const why = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y);
+      const why = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
       if (why) return { ok: false, reason: why };
       const id = this._next++;
       this.cannons.set(id, { id, beam: beamId, angle: clampAngle(angle) });
       return { ok: true, id };
+    }
+    /**
+     * 拆掉不符合当前炮座规则的火炮（读取旧规则下保存的蓝图时用），返回拆掉的数量。
+     * 只动火炮，杆件原样保留。
+     */
+    dropIllegalCannons() {
+      let n = 0;
+      for (const c of [...this.cannons.values()]) {
+        const bm = this.beams.get(c.beam);
+        const a = bm && this.nodes.get(bm.a), b = bm && this.nodes.get(bm.b);
+        if (!a || !b) continue;
+        if (this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y)) {
+          this.cannons.delete(c.id);
+          n++;
+        }
+      }
+      return n;
     }
     removeCannon(id) {
       if (!this.cannons.has(id)) return { ok: false, reason: "\u706B\u70AE\u4E0D\u5B58\u5728" };
@@ -522,8 +678,8 @@
         cannons: [...this.cannons.values()].map((c) => [c.id, c.beam, +(c.angle / DEG).toFixed(3)])
       };
     }
-    static fromJSON(o, side = "player") {
-      const bp = new _Blueprint(side);
+    static fromJSON(o, side = "player", rules2) {
+      const bp = new _Blueprint(side, rules2);
       bp.nodes.clear();
       bp.beams.clear();
       bp.cannons.clear();
@@ -534,7 +690,7 @@
       return bp;
     }
     clone(side = this.side) {
-      return _Blueprint.fromJSON(this.toJSON(), side);
+      return _Blueprint.fromJSON(this.toJSON(), side, this.rules);
     }
     /**
      * 完整性检查（读取存档后用）：锚点和核心齐全且在原位、节点不重叠且位置合法、
@@ -579,6 +735,7 @@
         pairs.add(pk);
         const w = this.checkSpan(bm.mat, a.x, a.y, b.x, b.y);
         if (w) return w;
+        if (this.rules.noOverlap && this._overlapping(a.x, a.y, b.x, b.y, /* @__PURE__ */ new Set([bm.id]))) return "\u6709\u6746\u4EF6\u91CD\u53E0";
       }
       if (this.cannons.size > CFG.maxCannons) return "\u706B\u70AE\u592A\u591A";
       const mounts = /* @__PURE__ */ new Set();
@@ -590,7 +747,7 @@
         if (!bm || mounts.has(c.beam) || !isNum(c.angle)) return "\u706B\u70AE\u65E0\u6548";
         mounts.add(c.beam);
         const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
-        const w = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y);
+        const w = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
         if (w) return w;
         c.angle = clampAngle(c.angle);
       }
@@ -617,8 +774,8 @@
      *   cannons: [[名字A, 名字B, 射角度数], ...]
      * 任何一步不合法都抛错，保证预设数据不会悄悄坏掉。
      */
-    static build(spec, side = "player") {
-      const bp = new _Blueprint(side);
+    static build(spec, side = "player", rules2) {
+      const bp = new _Blueprint(side, rules2);
       const ids = {};
       for (const [name, [x, y]] of Object.entries(spec.nodes)) {
         const r = bp.addNode(x, y);
@@ -693,9 +850,11 @@
     /**
      * @param {Blueprint} bpPlayer 左侧（玩家）蓝图
      * @param {Blueprint} bpEnemy  右侧（敌方）蓝图，本地坐标，这里做镜像
-     * @param {{seed?:number, peace?:boolean}} opts peace=true 时永不开火、不判胜负（只看结构受力）
+     * @param {{seed?:number, peace?:boolean, rules?:string|object}} opts peace=true 时永不开火、不判胜负（只看结构受力）；
+     *   rules 是规则版本（见 rules.js），不传就用左侧蓝图自带的版本
      */
     constructor(bpPlayer, bpEnemy, opts = {}) {
+      this.R = opts.rules ? getRules(opts.rules) : bpPlayer.rules || getRules();
       this.seed = opts.seed ?? 20261115;
       this.peace = !!opts.peace;
       this.rng = makeRng(this.seed);
@@ -776,9 +935,9 @@
         const p = map.get(bm.a), q = map.get(bm.b);
         return p < q ? [p, q] : [q, p];
       };
-      const beamList = [...bp.beams.values()].sort((u, v) => {
+      const beamList = bp.mergeGroups(this.R).sort((u, v) => {
         const ru = rank(u), rv = rank(v);
-        return ru[0] - rv[0] || ru[1] - rv[1];
+        return ru[0] - rv[0] || ru[1] - rv[1] || (u.mat < v.mat ? -1 : u.mat > v.mat ? 1 : 0);
       });
       for (const bm of beamList) {
         const a = map.get(bm.a), b = map.get(bm.b);
@@ -786,7 +945,8 @@
         const rest = Math.hypot(this.x[a] - this.x[b], this.y[a] - this.y[b]);
         const beam = {
           idx: this.beams.length,
-          bpId: bm.id,
+          bpId: bm.ids[0],
+          bpIds: bm.ids,
           side,
           a,
           b,
@@ -802,6 +962,8 @@
           hpMax: mat2.hp,
           slack: false,
           // 绳索当前是否松弛
+          touch: false,
+          // 杆件中段是否正搭在地形上（见地形碰撞那一步）
           lam: 0,
           // 本子步的约束乘子
           f: 0,
@@ -815,7 +977,7 @@
         this.beams.push(beam);
         this.nodeBeams[a].push(beam.idx);
         this.nodeBeams[b].push(beam.idx);
-        beamIdx.set(bm.id, beam.idx);
+        for (const id of bm.ids) beamIdx.set(id, beam.idx);
       }
       let k = 0;
       const cannonList = [...bp.cannons.values()].sort((u, v) => beamIdx.get(u.beam) - beamIdx.get(v.beam));
@@ -845,6 +1007,8 @@
           angle: pose.angle,
           tilt: 0,
           // 炮管当前方向相对设计方向的偏差（弧度）
+          grounded: false,
+          // 炮座节点正贴着地面（规则不允许时，这门炮不能开火）
           lastHit: -10
         });
         k++;
@@ -1019,6 +1183,7 @@
           if (!b.alive) continue;
           const i = b.a, j = b.b;
           if (w[i] + w[j] === 0) continue;
+          b.touch = false;
           const my = (y[i] + y[j]) * 0.5;
           if (my >= 0) continue;
           const mx = (x[i] + x[j]) * 0.5;
@@ -1030,6 +1195,7 @@
             if (-my <= mx - W) dy = -my;
             else dx = W - mx;
           } else continue;
+          b.touch = true;
           if (w[i] > 0) {
             x[i] += dx;
             y[i] += dy;
@@ -1116,6 +1282,7 @@
         side: b.side,
         beam: bi,
         bpId: b.bpId,
+        bpIds: b.bpIds,
         mat: b.matId,
         x1: this.x[i],
         y1: this.y[i],
@@ -1147,6 +1314,7 @@
           side: b.side,
           beam: b.idx,
           bpId: b.bpId,
+          bpIds: b.bpIds,
           mat: b.matId,
           x1: this.x[b.a],
           y1: this.y[b.a],
@@ -1190,11 +1358,38 @@
       const i = core.node;
       const cx = this.x[i], cy = this.y[i];
       this.events.push({ type: "coreDestroyed", side: core.side, x: cx, y: cy });
-      this._blast(cx, cy, null, 220, 4.2, CFG.shell.impulse * 2.2, 5);
+      this._blast(cx, cy, null, 220, 4.2, CFG.shell.impulse * 2.2, 5, null, null, this.R.blastOcclusion);
       this._refreshAround(i);
     }
-    /** 爆炸对杆件 / 节点 / 装置的作用。directBeam 已单独结算过直击伤害 */
-    _blast(ex, ey, directBeam, dmg0, R2, imp, IR, skipCore = null, skipCannon = null) {
+    /** 爆点 (ex,ey) 到目标点 (tx,ty) 之间有没有别的杆件挡着。绳索太细不算；skip 是目标自己 */
+    _blocked(ex, ey, tx, ty, skip) {
+      const rx = tx - ex, ry = ty - ey;
+      if (rx * rx + ry * ry < 0.12) return false;
+      const x = this.x, y = this.y, beams = this.beams;
+      for (let k = 0; k < beams.length; k++) {
+        const b = beams[k];
+        if (!b.alive || b === skip || b.tensionOnly) continue;
+        const ax = x[b.a], ay = y[b.a], sx = x[b.b] - ax, sy = y[b.b] - ay;
+        const den = rx * sy - ry * sx;
+        if (den > -1e-9 && den < 1e-9) {
+          if (Math.abs((ax - ex) * ry - (ay - ey) * rx) > 1e-6) continue;
+          const rr = rx * rx + ry * ry;
+          const t0 = ((ax - ex) * rx + (ay - ey) * ry) / rr, t1 = ((ax + sx - ex) * rx + (ay + sy - ey) * ry) / rr;
+          if (Math.min(0.96, Math.max(t0, t1)) - Math.max(0.04, Math.min(t0, t1)) > 1e-6) return true;
+          continue;
+        }
+        const t = ((ax - ex) * sy - (ay - ey) * sx) / den;
+        if (t <= 0.04 || t >= 0.96) continue;
+        const u = ((ax - ex) * ry - (ay - ey) * rx) / den;
+        if (u >= 0 && u <= 1) return true;
+      }
+      return false;
+    }
+    /**
+     * 爆炸对杆件 / 节点 / 装置的作用。directBeam 已单独结算过直击伤害。
+     * occlude=true 时，被别的杆件挡住的目标不吃溅射伤害（冲击波照常推动节点）。
+     */
+    _blast(ex, ey, directBeam, dmg0, R2, imp, IR, skipCore = null, skipCannon = null, occlude = false) {
       const x = this.x, y = this.y, vx = this.vx, vy = this.vy, w = this.w, alive = this.alive;
       const beams = this.beams;
       const dead = [];
@@ -1211,8 +1406,10 @@
         const l2 = sx * sx + sy * sy;
         let t = l2 > 0 ? ((ex - ax) * sx + (ey - ay) * sy) / l2 : 0;
         t = t < 0 ? 0 : t > 1 ? 1 : t;
-        const d = Math.hypot(ex - (ax + sx * t), ey - (ay + sy * t));
+        const cx = ax + sx * t, cy = ay + sy * t;
+        const d = Math.hypot(ex - cx, ey - cy);
         if (d >= R2) continue;
+        if (occlude && this._blocked(ex, ey, cx, cy, b)) continue;
         const f = 1 - d / R2;
         b.hp -= dmg0 * f * f;
         if (b.hp <= 0) dead.push(k);
@@ -1232,15 +1429,19 @@
       }
       for (const c of this.cannons) {
         if (!c.alive || c === skipCannon) continue;
-        const d = Math.max(0, Math.hypot(c.px - ex, c.py - ey) - CANNON.radius);
+        const dc = Math.hypot(c.px - ex, c.py - ey);
+        const d = Math.max(0, dc - CANNON.radius);
         if (d >= R2) continue;
+        if (occlude && d > 0 && this._blocked(ex, ey, ex + (c.px - ex) * d / dc, ey + (c.py - ey) * d / dc, null)) continue;
         const f = 1 - d / R2;
         this._damageCannon(c, dmg0 * f * f);
       }
       for (const core of this.cores) {
         if (!core || !core.alive || core === skipCore) continue;
-        const d = Math.max(0, Math.hypot(x[core.node] - ex, y[core.node] - ey) - CORE.radius);
+        const dk = Math.hypot(x[core.node] - ex, y[core.node] - ey);
+        const d = Math.max(0, dk - CORE.radius);
         if (d >= R2) continue;
+        if (occlude && d > 0 && this._blocked(ex, ey, ex + (x[core.node] - ex) * d / dk, ey + (y[core.node] - ey) * d / dk, null)) continue;
         const f = 1 - d / R2;
         this._damageCore(core, dmg0 * f * f);
       }
@@ -1270,11 +1471,18 @@
           this._killCannon(c, "sunk");
           continue;
         }
+        if (!this.R.groundMounts) {
+          const mb = this.beams[c.beam];
+          c.grounded = this.contact[mb.a] !== 0 || this.contact[mb.b] !== 0 || mb.touch;
+        }
         if (this.phase !== "fight") continue;
         c.cool -= dt;
         if (c.cool <= 0) {
-          this._fire(c);
-          c.cool += CANNON.interval;
+          if (c.grounded) c.cool = 0;
+          else {
+            this._fire(c);
+            c.cool += CANNON.interval;
+          }
         }
       }
     }
@@ -1297,7 +1505,11 @@
         vx: dx * S.speed + mvx,
         vy: dy * S.speed + mvy,
         age: 0,
-        alive: true
+        alive: true,
+        dmg: S.directDamage,
+        // 这发炮弹还剩多少直击伤害可用（规则开启穿透时会被沿途的杆件逐步用掉）
+        scored: false
+        // 是否已经计过一次「命中」
       });
       const J = S.mass * S.speed * CANNON.recoil;
       const ex = this.x[j] - this.x[i], ey = this.y[j] - this.y[i];
@@ -1383,21 +1595,55 @@
           t = t < 0 ? 0 : t > 1 ? 1 : t;
           const dx = sx - (ax + ex * t), dy = sy - (ay + ey * t);
           if (dx * dx + dy * dy < r * r) {
-            this._explode(s, b, null, null, b.matId);
-            break;
+            if (this._hitBeam(s, b)) break;
           }
         }
       }
       if (anyDead && this._sub % 24 === 0) this.shells = this.shells.filter((s) => s.alive);
     }
+    /**
+     * 炮弹碰到一根杆。不开穿透时直接引爆。开了穿透：
+     * 杆件的耐久吃得下这一发（剩余耐久 >= 炮弹剩余伤害），就在这里引爆；吃不下，杆件被打断，炮弹按用掉的份额减速，带着剩下的伤害继续飞。
+     * 伤害预算按动能算，所以速度按剩余份额的平方根缩；交给杆件的动量就是炮弹减掉的那部分，一发炮弹的冲量不会被重复使用。
+     * @returns {boolean} 炮弹是否停在了这根杆上
+     */
+    _hitBeam(s, b) {
+      if (!this.R.pierce || b.hp >= s.dmg) {
+        this._explode(s, b, null, null, b.matId);
+        return true;
+      }
+      const S = CFG.shell;
+      const k = Math.sqrt((s.dmg - b.hp) / s.dmg);
+      const px2 = S.mass * s.vx * (1 - k) * 0.5, py2 = S.mass * s.vy * (1 - k) * 0.5;
+      const i = b.a, j = b.b;
+      this.vx[i] += px2 * this.w[i];
+      this.vy[i] += py2 * this.w[i];
+      this.vx[j] += px2 * this.w[j];
+      this.vy[j] += py2 * this.w[j];
+      s.dmg -= b.hp;
+      s.vx *= k;
+      s.vy *= k;
+      b.hp = 0;
+      if (b.side !== s.side && !s.scored) {
+        this.stats[s.side].hits++;
+        s.scored = true;
+      }
+      this.events.push({ type: "pierce", x: s.x, y: s.y, kind: b.matId, side: s.side, cannon: s.cannon, hitSide: b.side });
+      this._breakBeam(b.idx, "blast");
+      return false;
+    }
     _explode(s, beam, core, cannon, kind) {
       const S = CFG.shell;
+      const direct = this.R.pierce ? s.dmg : S.directDamage;
       s.alive = false;
       const hitSide = beam ? beam.side : core ? core.side : cannon ? cannon.side : -1;
-      if (hitSide >= 0 && hitSide !== s.side) this.stats[s.side].hits++;
+      if (hitSide >= 0 && hitSide !== s.side && !s.scored) {
+        this.stats[s.side].hits++;
+        s.scored = true;
+      }
       this.events.push({ type: "explode", x: s.x, y: s.y, kind, side: s.side, cannon: s.cannon, hitSide, vx: s.vx, vy: s.vy });
       if (beam) {
-        beam.hp -= S.directDamage;
+        beam.hp -= direct;
         const i = beam.a, j = beam.b;
         const px2 = S.mass * s.vx * 0.5, py2 = S.mass * s.vy * 0.5;
         this.vx[i] += px2 * this.w[i];
@@ -1420,9 +1666,9 @@
           this.vy[mb.b] += py2 * this.w[mb.b];
         }
       }
-      this._blast(s.x, s.y, beam, S.blastDamage, S.blastRadius, S.impulse, S.impulseRadius, core, cannon);
-      if (core) this._damageCore(core, S.directDamage);
-      if (cannon) this._damageCannon(cannon, S.directDamage);
+      this._blast(s.x, s.y, beam, S.blastDamage, S.blastRadius, S.impulse, S.impulseRadius, core, cannon, this.R.blastOcclusion);
+      if (core) this._damageCore(core, direct);
+      if (cannon) this._damageCannon(cannon, direct);
     }
     // ------------------------------------------------------------------ 帧末：显示量与胜负
     _finishFrame(dt) {
@@ -1452,12 +1698,12 @@
       }
       if (this.phase !== "fight") return;
       this.fightTime += dt;
-      if (this.fightTime >= CFG.battleTime) {
+      if (this.fightTime >= this.R.battleTime) {
         this._endByHp("timeout");
         return;
       }
       let armed = false;
-      for (const c of this.cannons) if (c.alive) {
+      for (const c of this.cannons) if (c.alive && !c.grounded) {
         armed = true;
         break;
       }
@@ -1473,7 +1719,9 @@
     }
     _endByHp(reason) {
       const p = this.cores[0].hp, e = this.cores[1].hp;
-      this._end(Math.abs(p - e) < 1e-6 ? "draw" : p > e ? "player" : "enemy", reason);
+      const margin = this.R.drawMargin * this.cores[0].hpMax;
+      const tie = margin > 0 ? Math.abs(p - e) <= margin : Math.abs(p - e) < 1e-6;
+      this._end(tie ? "draw" : p > e ? "player" : "enemy", reason);
     }
     _end(winner, reason) {
       this.phase = "ended";
@@ -1485,7 +1733,7 @@
     // ------------------------------------------------------------------ 工具
     /** 剩余交火时间（秒） */
     get timeLeft() {
-      return Math.max(0, CFG.battleTime - this.fightTime);
+      return Math.max(0, this.R.battleTime - this.fightTime);
     }
     /** 状态指纹（确定性测试用） */
     hash() {
@@ -1653,14 +1901,17 @@
       T3: [1, 6],
       T4: [3, 6],
       G1: [2, 9],
-      G2: [4, 9]
+      G2: [4, 9],
+      P1: [-5, 2],
+      P2: [-2, 2]
     },
     beams: [
-      // 悬臂甲板：上弦钢、下弦木，前端两根钢斜撑托住核心正下方
-      ["A0", "D2", "steel"],
-      ["D2", "D4", "steel"],
+      // 悬臂甲板：上下弦用木，前端钢立杆 D4-U4 和钢斜撑 U4-D6 托住核心正下方。
+      // v2 加收装配费后，把三根弦杆和低位臼炮座改木，保留三层钢甲与塔顶钢炮座，总价 19932。
+      ["A0", "D2", "wood"],
+      ["D2", "D4", "wood"],
       ["D4", "D6", "wood"],
-      ["F2", "U2", "steel"],
+      ["F2", "U2", "wood"],
       ["U2", "U4", "wood"],
       ["F4", "U2", "wood"],
       ["A0", "U2", "wood"],
@@ -1704,12 +1955,16 @@
       ["T4", "G1", "wood"],
       ["T4", "G2", "wood"],
       ["G1", "G2", "steel"],
-      // 崖顶臼炮位：两端都是锚点，后坐力直接进山体
-      ["A6", "A3", "wood"]
+      // 崖顶臼炮台：炮座不能接锚点、不能贴地，所以用两个三角架把炮座 P1-P2 抬到 2 米高，后坐力经四条腿进锚点
+      ["A6", "P1", "wood"],
+      ["A3", "P1", "wood"],
+      ["A3", "P2", "wood"],
+      ["A0", "P2", "wood"],
+      ["P1", "P2", "wood"]
     ],
     cannons: [
       ["G1", "G2", { core: true, high: false }],
-      ["A6", "A3", { core: true, high: true }]
+      ["P1", "P2", { core: true, high: true }]
     ]
   };
   var STARTER_SPEC = {
@@ -1727,7 +1982,9 @@
       N6: [6, 3],
       R4: [4, 5],
       P: [6, 7],
-      X: [7, 4]
+      X: [7, 4],
+      P1: [-5, 2],
+      P2: [-2, 2]
     },
     beams: [
       ["A0", "D2", "wood"],
@@ -1750,10 +2007,14 @@
       ["R4", "P", "wood"],
       ["N6", "X", "wood"],
       ["X", "P", "wood"],
-      ["A6", "A3", "wood"]
+      ["A6", "P1", "wood"],
+      ["A3", "P1", "wood"],
+      ["A3", "P2", "wood"],
+      ["A0", "P2", "wood"],
+      ["P1", "P2", "wood"]
     ],
     cannons: [
-      ["A6", "A3", { core: true, high: true }]
+      ["P1", "P2", { core: true, high: true }]
     ]
   };
   var REFERENCE_SPEC = {
@@ -1776,7 +2037,10 @@
       E3: [5, 7],
       O1: [8, 2],
       O2: [8, 6],
-      O3: [6, 8]
+      O3: [6, 8],
+      P1: [-5, 2],
+      P2: [-2, 2],
+      P3: [1, 2]
     },
     beams: [
       ["A0", "D2", "steel"],
@@ -1811,13 +2075,18 @@
       ["O2", "E2", "wood"],
       ["O2", "O3", "steel"],
       ["O3", "E3", "wood"],
-      ["A6", "A3", "wood"],
-      ["A3", "A0", "wood"]
+      ["A6", "P1", "wood"],
+      ["A3", "P1", "wood"],
+      ["A3", "P2", "wood"],
+      ["A0", "P2", "wood"],
+      ["A0", "P3", "wood"],
+      ["P1", "P2", "steel"],
+      ["P2", "P3", "steel"]
     ],
     cannons: [
-      ["A6", "A3", { core: true, high: true }],
+      ["P1", "P2", { core: true, high: true }],
       // 对方塔顶炮的炮耳轴在对方本地 (3, 9.5)，镜像到己方本地是 (fieldW - 3, 9.5)
-      ["A3", "A0", { at: [CFG.fieldW - 3, 9.5], high: true }],
+      ["P2", "P3", { at: [CFG.fieldW - 3, 9.5], high: true }],
       // 对方甲板前端斜撑 U4-D6 的中点在对方本地 (5, -1)
       ["U4", "D6", { at: [CFG.fieldW - 5, -1], high: false }]
     ]
@@ -2998,6 +3267,11 @@
       if (this.hover && this.hover.type === hit.type && this.hover.id === hit.id) this.hover = null;
       return { ok: true };
     }
+    /** 假如这样改，造价会变多少：在蓝图副本上试一遍再比。改不成返回 null */
+    _costIf(change) {
+      const cl = this.player.clone();
+      return change(cl) ? cl.cost() - this.player.cost() : null;
+    }
     /** 造杆目标：光标附近的已有节点，否则最近网格点 */
     _target(from) {
       const { x, y } = this._world();
@@ -3012,12 +3286,17 @@
       }
       t.same = t.node === from;
       t.len = Math.hypot(t.x - fn.x, t.y - fn.y);
-      t.price = Blueprint.priceFor(mat2, fn.x, fn.y, t.x, t.y);
+      const hyp = t.same ? null : this._costIf((cl) => {
+        const a = cl.addNode(fn.x, fn.y), b = cl.addNode(t.x, t.y);
+        return a.ok && b.ok && cl.addBeam(a.id, b.id, mat2).ok;
+      });
+      t.price = hyp != null ? hyp : Blueprint.priceFor(mat2, fn.x, fn.y, t.x, t.y);
       let why = null;
       if (t.same) why = "\u540C\u4E00\u4E2A\u8282\u70B9";
       else if (t.node && bp.beamBetween(from, t.node)) why = "\u8FD9\u91CC\u5DF2\u7ECF\u6709\u6746\u4EF6";
       else if (!t.node) why = bp.checkNodePos(t.x, t.y);
       if (!why) why = bp.checkSpan(mat2, fn.x, fn.y, t.x, t.y);
+      if (!why && bp.rules.noOverlap && bp._overlapping(fn.x, fn.y, t.x, t.y)) why = "\u548C\u5DF2\u6709\u6746\u4EF6\u91CD\u53E0";
       t.reason = why;
       t.valid = !why;
       t.fx = fn.x;
@@ -3596,7 +3875,8 @@
             const a = bp.nodes.get(b.a), c = bp.nodes.get(b.b);
             let why = bp.checkSpan(tool, a.x, a.y, c.x, c.y);
             if (!why && bp.cannonOn(b.id) && !CANNON.mountMats.includes(tool)) why = "\u4E0A\u9762\u67B6\u7740\u706B\u70AE\uFF0C\u4E0D\u80FD\u6362\u6210\u8FD9\u79CD\u6750\u6599";
-            const delta = Blueprint.priceFor(tool, a.x, a.y, c.x, c.y) - cost;
+            const hyp = this._costIf((cl) => cl.setBeamMat(b.id, tool).ok);
+            const delta = hyp != null ? hyp : Blueprint.priceFor(tool, a.x, a.y, c.x, c.y) - bp.rules.assemblyFee - cost;
             info = why ? { text: why, color: BP2.invalid, bad: true } : { text: `\u6362\u6210${MATERIALS[tool].name} ${signed(delta)}`, color: BP2.highlight };
           } else if (tool === "cannon") {
             const why = bp.checkCannonMount(b.id);
@@ -39427,7 +39707,8 @@ void main() {
     steel: svg('<path d="M3 3.8h24M3 8.2h24" stroke-width="1.6"/>', "sw", "0 0 30 12"),
     rope: svg('<path d="M3 6h24" stroke-width="1.3" stroke-dasharray="3 2.6"/>', "sw", "0 0 30 12"),
     spring: svg('<path d="M2 6h4l2-3.6 3 7.2 3-7.2 3 7.2 3-7.2 2 3.6h6" stroke-width="1.6"/>', "sw", "0 0 30 12"),
-    cannon: svg('<path d="M9 7.4l13-5 1.3 2.8-12.4 5.6"/><circle cx="10.5" cy="8.4" r="2.6"/>', "sw", "0 0 30 12")
+    cannon: svg('<path d="M9 7.4l13-5 1.3 2.8-12.4 5.6"/><circle cx="10.5" cy="8.4" r="2.6"/>', "sw", "0 0 30 12"),
+    assembly: svg('<path d="M3 6h7M20 6h7" stroke-width="2.6"/><circle cx="15" cy="6" r="3.2"/>', "sw", "0 0 30 12")
   };
 
   // src/ui/hud.js
@@ -39442,12 +39723,14 @@ void main() {
     ["steel", "\u94A2\u6881"],
     ["rope", "\u7EF3\u7D22"],
     ["spring", "\u5F39\u7C27"],
+    ["assembly", "\u88C5\u914D"],
     ["cannon", "\u706B\u70AE"]
   ];
   var HELP_LINES = [
     "\u4ECE\u951A\u70B9\u6216\u5DF2\u6709\u8282\u70B9\u62D6\u51FA\u6746\u4EF6",
     "\u5355\u51FB\u8282\u70B9\u53EF\u8FDE\u7EED\u642D\u5EFA",
     "\u53F3\u952E\u6216\u62C6\u9664\u5DE5\u5177\u5220\u9664\uFF08\u5168\u989D\u9000\u6B3E\uFF09",
+    "\u706B\u70AE\u8981\u67B6\u5728\u81EA\u5DF1\u642D\u7684\u7ED3\u6784\u4E0A\uFF1A\u70AE\u5EA7\u4E0D\u80FD\u63A5\u951A\u70B9\uFF0C\u4E5F\u4E0D\u80FD\u8D34\u5730",
     "\u62D6\u52A8\u70AE\u7BA1\u8C03\u6574\u5C04\u89D2",
     "\u6EDA\u8F6E\u7F29\u653E\uFF0C\u7A7A\u683C\u6216\u4E2D\u952E\u62D6\u52A8\u5E73\u79FB",
     "Ctrl/Cmd+Z \u64A4\u9500"
@@ -39703,7 +39986,7 @@ void main() {
       });
       const mid = el("div", "duel-mid", duel);
       duel.insertBefore(mid, this.sides[1].side);
-      this.timerEl = el("div", "timer", mid, clock(CFG.battleTime));
+      this.timerEl = el("div", "timer", mid, clock(getRules().battleTime));
       this.specCap = el("div", "panel spec-cap", L, "");
       this.banner = el("div", "banner", L, "\u5F00\u706B");
       const pill = el("div", "panel ctrl pe", L);
@@ -40267,8 +40550,10 @@ void main() {
   var DEG7 = Math.PI / 180;
   var FOE_CORE2 = [CFG.fieldW - CFG.corePos[0], CFG.corePos[1]];
   var r3 = (v) => Math.round(v * 1e3) / 1e3;
-  function rules() {
+  function rules(version) {
+    const R2 = getRules(version);
     return {
+      version: R2.id,
       units: "\u7C73\uFF0Cy \u5411\u4E0A\u3002\u672C\u5730\u5750\u6807\uFF1A\u5DF1\u65B9\u5D16\u9876 y=0\uFF08x<=0 \u662F\u5C71\u4F53\u9876\u9762\uFF09\uFF0C\u5D16\u58C1\u5728 x=0\uFF0C\u671D +x \u5F00\u706B",
       field: { width: CFG.fieldW, waterY: CFG.waterY, foeCore: FOE_CORE2 },
       grid: CFG.grid,
@@ -40282,6 +40567,7 @@ void main() {
         return {
           id,
           costPerMeter: m.cost,
+          assemblyFee: R2.assemblyFee,
           massPerMeter: m.density,
           maxLength: m.maxLen,
           tensionLimitN: m.strT,
@@ -40290,11 +40576,17 @@ void main() {
           tensionOnly: !!m.tensionOnly
         };
       }),
+      pricing: R2.assemblyFee ? `\u6746\u4EF6\u9020\u4EF7 = \u6BCF\u7C73\u5355\u4EF7 \xD7 \u957F\u5EA6 + \u6BCF\u6839 ${R2.assemblyFee} \u7684\u88C5\u914D\u8D39\u3002${R2.mergeCollinear ? "\u540C\u6750\u8D28\u3001\u5171\u7EBF\u3001\u4E2D\u95F4\u8282\u70B9\u6CA1\u6709\u522B\u7684\u8FDE\u63A5\u4E5F\u6CA1\u6709\u706B\u70AE\u7684\u76F8\u90BB\u6746\u4EF6\u6309\u4E00\u6839\u7B97\uFF08\u53EA\u6536\u4E00\u6B21\u88C5\u914D\u8D39\uFF0C\u6A21\u62DF\u91CC\u4E5F\u662F\u4E00\u6839\u6746\u3001\u4E00\u4EFD\u8010\u4E45\uFF09\uFF0C\u6240\u4EE5\u628A\u76F4\u6746\u5207\u6210\u51E0\u6BB5\u6CA1\u6709\u597D\u5904" : ""}` : "\u6746\u4EF6\u9020\u4EF7 = \u6BCF\u7C73\u5355\u4EF7 \xD7 \u957F\u5EA6",
+      overlap: R2.noOverlap ? "\u4E24\u6839\u6746\u4E0D\u80FD\u6709\u4E00\u6BB5\u53E0\u5728\u540C\u4E00\u6761\u7EBF\u4E0A" : "\u5141\u8BB8\u6746\u4EF6\u91CD\u53E0",
       cannon: {
         cost: CANNON.cost,
         max: CFG.maxCannons,
         mass: CANNON.mass,
         hp: CANNON.hp,
+        mountRule: [
+          R2.anchorMounts ? null : "\u70AE\u5EA7\u6746\u4EF6\u7684\u4E24\u7AEF\u90FD\u4E0D\u80FD\u662F\u951A\u70B9",
+          R2.groundMounts ? null : "\u70AE\u5EA7\u7684\u4E24\u7AEF\u4E0D\u80FD\u5728\u5730\u9762\u4E0A\uFF08\u5D16\u9876\u9762 y=0 \u4E14 x<=0\uFF0C\u6216\u5D16\u58C1 x=0 \u4E14 y<=0\uFF09\uFF1B\u6218\u6597\u4E2D\u70AE\u5EA7\u8282\u70B9\u78B0\u5230\u5730\u9762\u7684\u70AE\u4E0D\u80FD\u5F00\u706B"
+        ].filter(Boolean).join("\uFF1B") || "\u6CA1\u6709\u989D\u5916\u9650\u5236",
         mountMaterials: CANNON.mountMats,
         minMountLength: CANNON.minBeamLen,
         maxMountSlopeDeg: CANNON.maxSlopeDeg,
@@ -40313,12 +40605,15 @@ void main() {
         blastDamage: CFG.shell.blastDamage,
         blastRadius: CFG.shell.blastRadius,
         dispersionDeg: CFG.shell.dispersion,
-        note: "\u6240\u6709\u6746\u4EF6\u90FD\u6321\u70AE\u5F39\uFF08\u81EA\u5BB6\u7684\u4E5F\u6321\uFF09\u3002\u53D7\u4F24\u7684\u6746\u4EF6\u627F\u8F7D\u529B\u4E0B\u964D\uFF0C\u53EF\u80FD\u88AB\u81EA\u5DF1\u625B\u7684\u529B\u538B\u65AD"
+        note: "\u6240\u6709\u6746\u4EF6\u90FD\u6321\u70AE\u5F39\uFF08\u81EA\u5BB6\u7684\u4E5F\u6321\uFF09\u3002\u53D7\u4F24\u7684\u6746\u4EF6\u627F\u8F7D\u529B\u4E0B\u964D\uFF0C\u53EF\u80FD\u88AB\u81EA\u5DF1\u625B\u7684\u529B\u538B\u65AD",
+        pierce: R2.pierce ? `\u6BCF\u53D1\u70AE\u5F39\u6709 ${CFG.shell.directDamage} \u70B9\u76F4\u51FB\u4F24\u5BB3\u9884\u7B97\uFF1A\u78B0\u5230\u7684\u6746\u4EF6\u5269\u4F59\u8010\u4E45\u5C0F\u4E8E\u9884\u7B97\u65F6\uFF0C\u6746\u4EF6\u88AB\u6253\u65AD\uFF0C\u70AE\u5F39\u51CF\u901F\u5E76\u5E26\u7740\u5269\u4E0B\u7684\u9884\u7B97\u7EE7\u7EED\u98DE\uFF1B\u5426\u5219\u5728\u8FD9\u6839\u6746\u4E0A\u5F15\u7206\u5E76\u4EA7\u751F\u6E85\u5C04\u3002\u6240\u4EE5\u8584\u6728\u677F\u3001\u5FEB\u65AD\u7684\u6746\u548C\u7EF3\u7D22\u6321\u4E0D\u4F4F\u4E00\u6574\u53D1\u70AE\u5F39` : "\u70AE\u5F39\u78B0\u5230\u7B2C\u4E00\u6839\u6746\u5C31\u5F15\u7206\uFF0C\u76F4\u51FB\u4F24\u5BB3\u5168\u90E8\u7ED9\u8FD9\u6839\u6746",
+        blast: R2.blastOcclusion ? "\u6E85\u5C04\u4F24\u5BB3\u4F1A\u88AB\u7206\u70B9\u548C\u76EE\u6807\u4E4B\u95F4\u7684\u6746\u4EF6\u6321\u4F4F\uFF08\u7EF3\u7D22\u4E0D\u7B97\uFF09\uFF0C\u6240\u4EE5\u9876\u76D6\u548C\u5916\u5899\u80FD\u62A4\u4F4F\u540E\u9762\u7684\u4E1C\u897F" : "\u6E85\u5C04\u4F24\u5BB3\u53EA\u770B\u8DDD\u79BB\uFF0C\u4E0D\u770B\u906E\u6321"
       },
       battle: {
         settleSeconds: CFG.settleTime,
-        timeLimit: CFG.battleTime,
-        win: "\u5BF9\u65B9\u6838\u5FC3\u8010\u4E45\u5F52\u96F6\u6216\u843D\u6C34\uFF1B\u5230\u65F6\u672A\u5206\u80DC\u8D1F\u5219\u6838\u5FC3\u5269\u4F59\u8010\u4E45\u591A\u8005\u80DC",
+        timeLimit: R2.battleTime,
+        win: `\u5BF9\u65B9\u6838\u5FC3\u8010\u4E45\u5F52\u96F6\u6216\u843D\u6C34\uFF1B\u5230\u65F6\u672A\u5206\u80DC\u8D1F\u5219\u6838\u5FC3\u5269\u4F59\u8010\u4E45\u591A\u8005\u80DC${R2.drawMargin ? `\uFF0C\u76F8\u5DEE\u4E0D\u8D85\u8FC7 ${Math.round(R2.drawMargin * CORE.hp)} \u70B9\u7B97\u5E73\u5C40` : ""}`,
+        entry: R2.needCannon ? "\u53C2\u8D5B\u5821\u5792\u81F3\u5C11\u8981\u6709\u4E00\u95E8\u6C89\u964D\u540E\u8FD8\u80FD\u5F00\u706B\u7684\u706B\u70AE" : "\u6CA1\u6709\u989D\u5916\u8981\u6C42",
         automatic: "\u5F00\u6218\u540E\u53CC\u65B9\u5168\u81EA\u52A8\uFF0C\u5C04\u89D2\u5728\u84DD\u56FE\u91CC\u5B9A\u597D\uFF1B\u540C\u6837\u7684\u4E24\u5EA7\u5821\u5792 + \u540C\u6837\u7684\u79CD\u5B50\uFF0C\u7ED3\u679C\u5B8C\u5168\u76F8\u540C"
       },
       physics: "\u94F0\u63A5\u6841\u67B6\uFF1A\u6CA1\u6709\u4E09\u89D2\u5F62\u652F\u6491\u7684\u65B9\u6846\u662F\u673A\u6784\uFF0C\u4F1A\u6298\u53E0\u3002\u6BCF\u6839\u6746\u53EA\u53D7\u8F74\u5411\u62C9\u538B\uFF0C\u8D85\u8FC7\u6781\u9650\u5373\u65AD"
@@ -40329,13 +40624,18 @@ void main() {
     e.fortError = true;
     return e;
   }
-  function loadFort(desc, side = "player") {
+  function loadFort(desc, side = "player", rules2) {
     if (!desc || typeof desc !== "object") throw fail("\u5821\u5792\u63CF\u8FF0\u5FC5\u987B\u662F\u4E00\u4E2A\u5BF9\u8C61");
-    if (desc instanceof Blueprint) return desc.clone(side);
+    if (desc instanceof Blueprint) {
+      const bp2 = Blueprint.fromJSON(desc.toJSON(), side, rules2 || desc.rules);
+      const why = bp2.validate();
+      if (why) throw fail(why);
+      return bp2;
+    }
     if (Array.isArray(desc.nodes)) {
       let bp2;
       try {
-        bp2 = Blueprint.fromJSON(desc, side);
+        bp2 = Blueprint.fromJSON(desc, side, rules2);
       } catch (e) {
         throw fail("\u5B58\u6863\u683C\u5F0F\u65E0\u6CD5\u89E3\u6790\uFF1A" + e.message);
       }
@@ -40344,7 +40644,7 @@ void main() {
       return bp2;
     }
     if (!Array.isArray(desc.beams)) throw fail("\u7F3A\u5C11 beams \u6570\u7EC4");
-    const bp = new Blueprint(side);
+    const bp = new Blueprint(side, rules2);
     const named = desc.nodes && typeof desc.nodes === "object" ? desc.nodes : {};
     const ids = /* @__PURE__ */ new Map();
     const nodeOf = (ref, what) => {
@@ -40521,6 +40821,10 @@ ${rows(desc.cannons)}
       this.hud.setMuted(this.muted);
       this.hud.setFocus(this.focus);
       this._warmUp();
+      if (this._droppedCannons) {
+        this.hud.toast(`\u89C4\u5219\u66F4\u65B0\uFF1A\u70AE\u5EA7\u4E0D\u80FD\u518D\u63A5\u951A\u70B9\u6216\u8D34\u5730\uFF0C\u5DF2\u62C6\u9664 ${this._droppedCannons} \u95E8\u4E0D\u5408\u89C4\u7684\u70AE\u5E76\u9000\u6B3E`, "info");
+        this._save();
+      }
       requestAnimationFrame((t) => this.frame(t));
     }
     /**
@@ -40568,7 +40872,10 @@ ${rows(desc.cannons)}
         const raw = localStorage.getItem(SAVE_KEY);
         if (!raw) return null;
         const bp = Blueprint.fromJSON(JSON.parse(raw), "player");
-        return bp.validate() === null ? bp : null;
+        this._droppedCannons = bp.dropIllegalCannons();
+        if (bp.validate() === null) return bp;
+        this._droppedCannons = 0;
+        return null;
       } catch {
         return null;
       }
@@ -40706,6 +41013,7 @@ ${rows(desc.cannons)}
       });
       window.trussfort = {
         rules,
+        // rules() 当前规则；rules('v1') 旧版本
         loadFort: (side, desc) => this.setFort(side, desc),
         exportFort: (side) => exportFort(side === "enemy" ? this.enemy : this.player),
         resetEnemy: () => this.resetEnemy(),
@@ -40799,7 +41107,7 @@ ${rows(desc.cannons)}
       }
       this.audio.unlock();
       this.editor.setEnabled(false);
-      this.sim = spec ? new Sim(spec.a, spec.b, { seed: spec.seed }) : new Sim(this.player, this.enemy, { seed: CFG.seed ?? 20261115 });
+      this.sim = spec ? new Sim(spec.a, spec.b, { seed: spec.seed, rules: spec.rules }) : new Sim(this.player, this.enemy, { seed: CFG.seed ?? 20261115 });
       this.acc = 0;
       this.paused = false;
       this.resultTimer = -1;
@@ -40892,7 +41200,8 @@ ${rows(desc.cannons)}
         });
         const [fl, fr] = await Promise.all([get(round.forts[g.left]), get(round.forts[1 - g.left])]);
         if (gen !== this._replayGen || this.state !== from || this.sim !== fromSim) return false;
-        const a = loadFort(fl, "player"), b = loadFort(fr, "enemy");
+        const rules2 = match.rules || "v1";
+        const a = loadFort(fl, "player", rules2), b = loadFort(fr, "enemy", rules2);
         const names = [shortName(match.players[g.left]), shortName(match.players[1 - g.left])];
         const caption = `\u7B2C ${round.round} \u8F6E \xB7 \u7B2C ${gi + 1} \u5C40`;
         const record = { winner: g.winner == null ? null : g.winner === g.left ? "player" : "enemy", seconds: g.seconds };
@@ -40901,7 +41210,7 @@ ${rows(desc.cannons)}
           this._teardownBattle();
           this.state = "blueprint";
         }
-        this.spectate = { a, b, seed: g.seed, names, caption, record, match, ri, gi };
+        this.spectate = { a, b, seed: g.seed, rules: rules2, names, caption, record, match, ri, gi };
         this.hud.setSpectate({ names, caption, hasNext: !!this._nextGame(match, ri, gi) });
         this.arena.close();
         if (!this.startBattle(inBattle)) {
@@ -40992,7 +41301,11 @@ ${rows(desc.cannons)}
         this.audio.onEvent(e, sim);
         this.hud.onEvent(e, sim);
         if (e.type === "break" && e.side === 0 && e.cause !== "sunk" && !this._collect.broken.has(e.bpId)) {
-          this._collect.broken.set(e.bpId, { order: ++this._collect.order, cause: e.cause, t: sim.time });
+          const info = { order: ++this._collect.order, cause: e.cause, t: sim.time };
+          for (const id of e.bpIds || [e.bpId]) this._collect.broken.set(id, info);
+        } else if (e.type === "fightStart" && !this.spectate) {
+          const stuck = sim.cannons.filter((c) => c.side === 0 && c.alive && c.grounded).length;
+          if (stuck) this.hud.toast(`\u6709 ${stuck} \u95E8\u70AE\u7684\u70AE\u5EA7\u8D34\u5728\u5730\u9762\u4E0A\uFF0C\u5F00\u4E0D\u4E86\u706B`, "error");
         } else if (e.type === "end") {
           this.resultTimer = RESULT_DELAY;
         }
@@ -41005,8 +41318,9 @@ ${rows(desc.cannons)}
       for (let i = 0; i < beams.length; i++) {
         const b = beams[i];
         if (b.side !== 0 || !b.alive) continue;
-        const p = peak.get(b.bpId) || 0;
-        if (b.stressVis > p) peak.set(b.bpId, b.stressVis);
+        for (const id of b.bpIds) {
+          if (b.stressVis > (peak.get(id) || 0)) peak.set(id, b.stressVis);
+        }
       }
     }
     // ------------------------------------------------------------ 主循环
