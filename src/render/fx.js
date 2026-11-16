@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { CFG, CANNON } from '../config.js';
+import { getMap } from '../map.js';
 import { THEME } from '../theme.js';
 import { F, ParticlePool, RingPool, makeSpec, resetSpec } from './fx-pool.js';
 import { PieceSet, WreckSet } from './fx-body.js';
@@ -125,9 +126,11 @@ export class Fx {
       ? (x) => world.waterLevelAt(x, 0)
       : () => CFG.waterY;
     this.waterAt = waterAt;
+    const map0 = world.map || getMap();
     this.env = {
-      fieldW: CFG.fieldW,
-      waterY: CFG.waterY,
+      fieldW: map0.fieldW,
+      waterY: map0.waterY,
+      groundAt: map0.groundTop,
       waterAt,
       miniSplash: (x, y) => this._miniSplash(x, y),
       pop: (x, y) => this._bubblePop(x, y),
@@ -149,6 +152,12 @@ export class Fx {
       case 'coreSunk': this._onCoreSunk(e); break;
       default: break;
     }
+  }
+
+  /** 换地图：碎块落地、落水的高度跟着地图走 */
+  setMap(map) {
+    const M = getMap(map);
+    this.env.fieldW = M.fieldW; this.env.waterY = M.waterY; this.env.groundAt = M.groundTop;
   }
 
   _shake(s) { if (typeof this.world.addShake === 'function') this.world.addShake(s); }
@@ -594,7 +603,7 @@ export class Fx {
     const P = this.P, C = this.C;
     if (!(power > 0)) power = 0.15;
     if (power > 1) power = 1;
-    if (!(wl === wl)) wl = CFG.waterY;
+    if (!(wl === wl)) wl = this.env.waterY;
     const sp = Math.sqrt(power);
     // 扇形水滴
     const n = small ? Math.round(5 + 8 * power) : Math.round(8 + 16 * power);

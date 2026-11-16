@@ -3,6 +3,7 @@
 //
 //   node arena/referee.mjs --out arena/某次比赛 --work 临时目录 [--minutes 20] [--rounds 3] [--round-cap 360]
 //        [--agy-model gemini-4-hydrogen-high] [--codex-model gpt-6.1-terra] [--codex-effort high] [--mock]
+//        [--map strait|plain|ridge|地图文件.json]   在哪张地图上打（默认 strait）；地图会写进比赛记录，回放按它来
 //
 // 模型只负责输出堡垒 JSON；合规检查和对战都在这里用引擎完成。模型的回答只当数据用：
 // 解析成 JSON → loadFort 规范化 → 进引擎，其它文字一律不执行、不转发给对手。
@@ -13,9 +14,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { rules, loadFort, exportFort, formatFort, checkFort, duel, match } from '../src/ai/api.js';
+import { rules, loadFort, exportFort, formatFort, checkFort, duel, match, getMap, mapData } from '../src/ai/api.js';
 import { CFG, MATERIALS, CANNON } from '../src/config.js';
-import { makeEnemyFort, makeReferenceFort } from '../src/sim/forts.js';
+import { presetFort } from '../src/sim/forts.js';
+import { MAPS } from '../src/map.js';
 import { CURRENT_RULES } from '../src/rules.js';
 import { buildIndex } from './index.mjs';
 
@@ -33,6 +35,17 @@ const ROUND_CAP = Number(opt('--round-cap', 360));          // 每轮设计时�
 const AGY_MODEL = opt('--agy-model', 'gemini-4-hydrogen-high');
 const CODEX_MODEL = opt('--codex-model', 'gpt-6.1-terra');
 const CODEX_EFFORT = opt('--codex-effort', 'high');
+// 地图：内置名字，或者一份地图 JSON 文件
+const MAP = (() => {
+  const name = opt('--map', 'strait');
+  try {
+    return getMap(MAPS[name] ? name : JSON.parse(fs.readFileSync(path.resolve(name), 'utf8')));
+  } catch (e) {
+    console.error(`地图 ${name} 用不了：${e.message}。内置地图：${Object.keys(MAPS).join('、')}`);
+    process.exit(2);
+  }
+})();
+const ON_STRAIT = MAP.raw === MAPS.strait;
 const nameOf = (model, drop) => model.split('-').filter((w) => !drop.includes(w) && !/^[\d.]+$/.test(w)).pop();
 const titleOf = (model) => model.split('-').map((w) => (w === 'gpt' ? 'GPT' : w[0].toUpperCase() + w.slice(1))).join(' ');
 
@@ -83,7 +96,7 @@ async function ask(p, body, timeoutSec, tag) {
   if (MOCK) {
     await new Promise((r) => setTimeout(r, 300));
     const n = mockN++;
-    const text = n === 1 ? '这是一段不合规的回答 {"beams": [[[0,0],[9,9],"wood"]]}' : formatFort(exportFort((p.via === 'agy' ? makeReferenceFort : makeEnemyFort)().clone('player')));
+    const text = n === 1 ? '这是一段不合规的回答 {"beams": [[[0,0],[9,9],"wood"]]}' : formatFort(exportFort(((p.via === 'agy' && presetFort(MAP, 'reference')) || presetFort(MAP, 'garrison') || (() => { throw new Error('--mock 需要一张带预设堡垒的地图'); })()).clone('player')));
     p.mem = 'mock';
     res = { text: '好的，方案如下：\n```json\n' + text + '\n```', seconds: 0.3, timedOut: false };
   } else if (p.via === 'agy') {
@@ -135,10 +148,10 @@ function parseFort(text) {
 function tryFort(text, name) {
   const o = parseFort(text);
   if (!o) return { error: '回答里找不到可解析的 JSON 对象' };
-  const c = checkFort(o);
+  const c = checkFort(o, { map: MAP });
   if (!c.ok) return { error: c.errors.join('；') };
-  // 只保留引擎认得的内容：规范化后的杆件和火炮
-  return { fort: exportFort(loadFort(o, 'player'), name), check: c };
+  // 只保留引擎认得的内容：规范化后的核心位置、杆件和火炮
+  return { fort: exportFort(loadFort(o, 'player', undefined, MAP), name), check: c };
 }
 
 // ---------- 给模型的文字 ----------
@@ -146,7 +159,8 @@ const aiDoc = fs.readFileSync(path.join(ROOT, 'AI.md'), 'utf8');
 const section = (title) => { const m = new RegExp(`## ${title}\\n([\\s\\S]*?)(?=\\n## |$)`).exec(aiDoc); return m ? `## ${title}\n${m[1].trim()}` : ''; };
 // 赛前材料里不放完整的堡垒：给过完整样板之后，所有参赛方都从它改起，结构趋同（前两场比赛的教训）。
 // 只给几个「局部原理」的小例子，每个例子后面的事实都是裁判当场用引擎算出来的。
-const PRINCIPLES = (() => {
+// 这些例子的坐标是照「海峡」的锚点写的，所以只在海峡上给；别的地图只给文字原理。
+const PRINCIPLES = !ON_STRAIT ? null : (() => {
   const base = (mat) => [[[0, 0], [2, 0], mat], [[0, -2], [2, 0], mat], [[2, 0], [4, 3], mat], [[0, 0], [2, 3], mat], [[2, 3], [4, 3], mat], [[2, 0], [2, 3], mat]];
   const stat = (f) => checkFort(f, { ignoreBudget: true }).static;
   // 1. 三角形才站得住：只用两根杆把核心「挂」出去，和用三角形托住
@@ -166,6 +180,8 @@ const PRINCIPLES = (() => {
   return { chain, braced: base('wood'), s1a, s1b, low: low('wood'), tower: tower('wood'), fireLow: fire(low('wood')), fireWood: fire(tower('wood')), fireSteel: fire(tower('steel')) };
 })();
 const rows = (arr) => arr.map((x) => JSON.stringify(x)).join('\n');
+
+const REPORT_FIELDS = `战报字段：landed 是这门炮的炮弹都落在了哪（enemy_member / enemy_core / enemy_cannon / own_member / own_core / own_cannon / ground / water），出现 own_ 说明在打自己；maxTiltDeg 是炮座最大偏角；peak 是杆件受力峰值（1 就是到极限）；broke.cause 中 stress 是被压断或拉断，blast 是被炸断，sunk 是沉没。reason 中 coreDestroyed 是核心被打爆，coreSunk 是核心落水，timeout 是到时按核心耐久判定。`;
 
 function briefing(p) {
   return `你正在参加一场「桁垒 TRUSSFORT」堡垒设计对抗赛。你是参赛方「${p.label}」，对手是另一家的 AI 模型，裁判是 Claude。
@@ -187,10 +203,21 @@ ${section('坐标和规则')}
 
 ${section('设计时要知道的物理')}
 
-## 规则数值（引擎导出，以此为准）
-${JSON.stringify(rules())}
+## 规则数值（引擎导出，以此为准；场地见其中的 map 和 core）
+这场比赛的地图是「${MAP.name}」。锚点、建造范围、核心范围、地形都以下面的数值为准，文字说明里凡是和它不一致的，以数值为准。
+${JSON.stringify(rules(undefined, MAP))}
 
-## 几个局部原理（不是完整的堡垒，只说明规则怎么起作用；后面的数字都是裁判用引擎算的）
+${PRINCIPLES ? principlesText() : `## 几个局部原理
+1. 没有三角形支撑的结构是机构，会折叠：核心要用三角形托住，只「挂」在两根杆上会垂下去。
+2. 炮座必须由你自己搭的结构托着：炮座杆件的两端都不能是锚点，也不能贴地。火炮重 ${CANNON.mass} kg，后坐力是真实载荷，架得越高越难扛，高塔要用钢。
+3. 绳索只受拉，松了就不传力；它很细，挡不住一整发炮弹，也挡不住溅射。
+4. 一发炮弹有 ${CFG.shell.directDamage} 点直击伤害：剩余耐久小于这个数的杆件会被打穿，炮弹减速后带着剩下的伤害继续飞。一层木杆（耐久 ${MATERIALS.wood.hp}）挡不住一发，钢杆（耐久 ${MATERIALS.steel.hp}）可以。
+5. 溅射伤害会被爆点和目标之间的杆件挡住，所以顶盖和外墙能护住后面的东西。`}
+${REPORT_FIELDS}`;
+}
+
+function principlesText() {
+  return `## 几个局部原理（不是完整的堡垒，只说明规则怎么起作用；后面的数字都是裁判用引擎算的）
 1. 没有三角形支撑的结构是机构，会折叠。只用两根木杆把核心「挂」出去：
 ${formatFort({ beams: PRINCIPLES.chain, cannons: [] })}静载结果：核心${PRINCIPLES.s1a.coreHeld ? '托住了' : `没托住，下沉 ${PRINCIPLES.s1a.coreSagMeters} 米`}。改成三角形托住：
 ${formatFort({ beams: PRINCIPLES.braced, cannons: [] })}静载结果：核心${PRINCIPLES.s1b.coreHeld ? '托住了' : '没托住'}，自重下断了 ${PRINCIPLES.s1b.membersLostUnderOwnWeight} 根，受力峰值 ${PRINCIPLES.s1b.peakStressRatio}（1 就是到极限）。
@@ -200,8 +227,7 @@ ${formatFort(PRINCIPLES.low)}   架在 6 米高的木塔顶上：${PRINCIPLES.fi
 ${formatFort(PRINCIPLES.tower)}   同一座塔全部换成钢杆：${PRINCIPLES.fireSteel}。
 3. 绳索只受拉，松了就不传力；它很细，挡不住一整发炮弹，也挡不住溅射。
 4. 一发炮弹有 ${CFG.shell.directDamage} 点直击伤害：剩余耐久小于这个数的杆件会被打穿，炮弹减速后带着剩下的伤害继续飞。一层木杆（耐久 ${MATERIALS.wood.hp}）挡不住一发，钢杆（耐久 ${MATERIALS.steel.hp}）可以。
-5. 溅射伤害会被爆点和目标之间的杆件挡住，所以顶盖和外墙能护住后面的东西。
-战报字段：landed 是这门炮的炮弹都落在了哪（enemy_member / enemy_core / enemy_cannon / own_member / own_core / own_cannon / ground / water），出现 own_ 说明在打自己；maxTiltDeg 是炮座最大偏角；peak 是杆件受力峰值（1 就是到极限）；broke.cause 中 stress 是被压断或拉断，blast 是被炸断，sunk 是沉没。reason 中 coreDestroyed 是核心被打爆，coreSunk 是核心落水，timeout 是到时按核心耐久判定。`;
+5. 溅射伤害会被爆点和目标之间的杆件挡住，所以顶盖和外墙能护住后面的东西。`;
 }
 
 function sideDetail(s) {
@@ -230,13 +256,13 @@ function roundPrompt(r, i, sec, last) {
     }).join('\n'));
   } else out.push(`## 上一轮没有开打：${last.why}`);
   if (me.fort) {
-    const c = checkFort(me.fort, { versus: foe.fort || undefined });
+    const c = checkFort(me.fort, { versus: foe.fort || undefined, map: MAP });
     out.push('## 你当前堡垒的体检（裁判用引擎算的；shots 是蓝图姿态下的理想弹道，已把对手上一轮的结构算进去）');
     out.push(JSON.stringify({ cost: c.cost, budget: c.budget, breakdown: c.breakdown, static: c.static }) + '\n' + rows(c.shots));
   } else out.push('## 你目前还没有合规的堡垒');
   if (me.fort && foe.fort) {
-    const home = i === 0 ? duel(me.fort, foe.fort) : duel(foe.fort, me.fort);   // 第 1 局：种子相同，hydrogen 在左
-    const away = i === 0 ? duel(foe.fort, me.fort) : duel(me.fort, foe.fort);
+    const home = i === 0 ? duel(me.fort, foe.fort, { map: MAP }) : duel(foe.fort, me.fort, { map: MAP });   // 第 1 局：种子相同，hydrogen 在左
+    const away = i === 0 ? duel(foe.fort, me.fort, { map: MAP }) : duel(me.fort, foe.fort, { map: MAP });
     const [g1mine, g1foe] = i === 0 ? [home.A, home.B] : [home.B, home.A];
     const [g2mine, g2foe] = i === 0 ? [away.B, away.A] : [away.A, away.B];
     out.push(`## 种子 ${home.seed}、你在${i === 0 ? '左' : '右'}的那一局：你这一方（坐标是你的本地坐标）`, sideDetail(g1mine));
@@ -285,7 +311,7 @@ async function main() {
     const subs = await Promise.all([design(r, 0, sec, last), design(r, 1, sec, last)]);
     const [A, B] = players;
     let m, why = '';
-    if (A.fort && B.fort) m = match(A.fort, B.fort, { games: 4 });
+    if (A.fort && B.fort) m = match(A.fort, B.fort, { games: 4, map: MAP });
     else {
       why = !A.fort && !B.fort ? '双方都没有合规堡垒' : `${(A.fort ? B : A).id} 没有合规堡垒，判 4 局全负`;
       m = { winner: A.fort ? 'A' : B.fort ? 'B' : 'draw', aWins: A.fort ? 4 : 0, bWins: B.fort ? 4 : 0, draws: 0, games: [] };
@@ -313,6 +339,7 @@ async function main() {
   const result = {
     players: players.map((p) => ({ id: p.id, label: p.label, via: p.via, model: p.model, score: p.score, halted: p.halted })),
     rules: CURRENT_RULES,   // 这场比赛用的规则版本，回放时按它来
+    map: ON_STRAIT || MAPS[MAP.id] === MAP.raw ? MAP.id : mapData(MAP),   // 在哪张图上打的：内置地图记名字，自定义地图把数据整份记下来
     winner: winner || 'draw', decidedBy: winner ? by : '全部相同',
     rounds: history, totalSeconds: Math.round(elapsed()), limitSeconds: MINUTES * 60, mock: MOCK,
   };

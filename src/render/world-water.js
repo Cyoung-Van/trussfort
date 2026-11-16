@@ -19,12 +19,15 @@ function ampAt(z) {
   return z > -25 ? 1 : z < -85 ? 0.25 : 1 - 0.75 * ((-25 - z) / 60);
 }
 
+// 当前地图的水面高度和水底深度（换地图时由 Water 的构造函数更新）
+let LEVEL = CFG.waterY, BED = CFG.seabedY, MID = CFG.fieldW / 2;
+
 /** 水面高度（米）。x, z 世界坐标，t 秒 */
 export function waveHeight(x, z, t) {
   const h = W1[0] * Math.sin(W1[1] * x + W1[2] * z + W1[3] * t + W1[4])
     + W2[0] * Math.sin(W2[1] * x + W2[2] * z + W2[3] * t + W2[4])
     + W3[0] * Math.sin(W3[1] * x + W3[2] * z + W3[3] * t + W3[4]);
-  return CFG.waterY + h * ampAt(z);
+  return LEVEL + h * ampAt(z);
 }
 
 function rowsZ() {
@@ -40,8 +43,15 @@ function rowsZ() {
 }
 
 export class Water {
-  /** faceLines: [左崖水线, 右崖水线]，每条为 [[x, z], ...]（z 从后往前） */
-  constructor(faceLines) {
+  /**
+   * shores: 岸线列表，每条为 { dir, line: [[x, z], ...] }（z 从后往前；dir = +1 表示水在 +x 一侧）
+   * opts: { waterY, bedY, midX } 水面高度、水底高度、场地中线（不传就是「海峡」的数值）
+   */
+  constructor(shores, opts = {}) {
+    LEVEL = opts.waterY ?? CFG.waterY;
+    BED = opts.bedY ?? CFG.seabedY;
+    MID = opts.midX ?? CFG.fieldW / 2;
+    const faceLines = shores;
     this.group = new THREE.Group();
     this.group.name = 'water';
     this._buildSurface();
@@ -59,7 +69,7 @@ export class Water {
     const base = new Float32Array(n * 3);
     const nrm = new Float32Array(n * 3);
     const cNear = col(THEME.world.water), cFar = col(THEME.world.waterDeep);
-    const cx = CFG.fieldW / 2;
+    const cx = MID;
     let v = 0;
     for (let k = 0; k < nz; k++) {
       const z = zs[k];
@@ -67,7 +77,7 @@ export class Water {
       const xL = -70 - widen, xR = 100 + widen;
       for (let i = 0; i <= NX; i++, v++) {
         const x = xL + (xR - xL) * (i / NX);
-        pos[v * 3] = x; pos[v * 3 + 1] = CFG.waterY; pos[v * 3 + 2] = z;
+        pos[v * 3] = x; pos[v * 3 + 1] = LEVEL; pos[v * 3 + 2] = z;
         nrm[v * 3 + 1] = 1;
         const d = Math.hypot((x - cx) / 1.4, z);
         const t = sstep(10, 75, d);
@@ -113,7 +123,7 @@ export class Water {
   _buildSeabed() {
     const g = new THREE.PlaneGeometry(420, 380, 1, 1);
     g.rotateX(-Math.PI / 2);
-    g.translate(15, CFG.seabedY - 0.6, -20);
+    g.translate(MID, BED - 0.6, -20);
     // 海床：waterDeep 大幅压暗
     const m = new THREE.MeshStandardMaterial({ color: shade(col(THEME.world.waterDeep), 0.3), roughness: 1, metalness: 0 });
     const mesh = new THREE.Mesh(g, m);
@@ -123,8 +133,7 @@ export class Water {
 
   _buildFoam(faceLines) {
     const strips = [];
-    faceLines.forEach((line, side) => {
-      const dir = side === 0 ? 1 : -1;
+    faceLines.forEach(({ dir, line }) => {
       // 加密：每两个剖面之间插 3 个点
       const pts = [];
       for (let i = 0; i < line.length - 1; i++) {
@@ -178,10 +187,14 @@ export class Water {
     this.update(0);
   }
 
+  dispose() {
+    this.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+  }
+
   update(t) {
     const pos = this._pos, colr = this._col, base = this._base, n = this._n;
     const hr = this._hi[0], hg = this._hi[1], hb = this._hi[2];
-    const wy = CFG.waterY, inv = 1 / AMP_SUM;
+    const wy = LEVEL, inv = 1 / AMP_SUM;
     for (let v = 0, o = 0; v < n; v++, o += 3) {
       const y = waveHeight(pos[o], pos[o + 2], t);
       pos[o + 1] = y;

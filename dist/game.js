@@ -2,6 +2,8 @@
   // src/config.js
   var CFG = {
     // ---- 场地 ----
+    // 场地现在由地图决定（见 map.js）。下面这几项是「海峡」这张图的数值，只剩海峡的手调悬崖画面
+    // （render/world-terrain.js）和几处默认值还在读；模拟、蓝图校验、AI 接口都不再用它们。
     fieldW: 30,
     // 两座悬崖崖边之间的水面宽度
     waterY: -6,
@@ -173,31 +175,406 @@
     hp: 500,
     radius: 0.7
   };
-  function worldX(side, x) {
-    return side === 1 || side === "enemy" ? CFG.fieldW - x : x;
+
+  // src/map.js
+  var EPS = 1e-6;
+  var FAR = 1e3;
+  var MAPS = {
+    // 海峡：两座悬崖隔水相望，核心悬在水面上方。2026-11 的比赛记录都打在这张图上，地形和锚点不能再动
+    strait: {
+      id: "strait",
+      name: "\u6D77\u5CE1",
+      fieldW: 30,
+      ground: [[-60, 0], [0, 0], [0, -13]],
+      water: -6,
+      build: { xMin: -8, xMax: 8, yMin: -4, yMax: 11 },
+      anchors: [[-6, 0], [-3, 0], [0, 0], [0, -2], [0, -4]],
+      coreZone: { xMin: 1, xMax: 7, yMin: 0, yMax: 7 },
+      core: [4, 3],
+      budget: 2e4,
+      maxCannons: 3
+    },
+    // 旷野：一马平川，没有水。平射毫无遮挡，核心离地两米以上
+    plain: {
+      id: "plain",
+      name: "\u65F7\u91CE",
+      fieldW: 32,
+      ground: [[-60, 0]],
+      water: null,
+      build: { xMin: -8, xMax: 8, yMin: 0, yMax: 12 },
+      anchors: [[-6, 0], [-3, 0], [0, 0], [3, 0], [6, 0]],
+      coreZone: { xMin: -4, xMax: 6, yMin: 2, yMax: 8 },
+      core: [2, 4],
+      budget: 2e4,
+      maxCannons: 3
+    },
+    // 山梁：中间横着一道七米高的土梁，没有水。低处的平射全被挡住，要么造高塔，要么吊射
+    ridge: {
+      id: "ridge",
+      name: "\u5C71\u6881",
+      fieldW: 34,
+      ground: [[-60, 0], [9, 0], [14, 7]],
+      water: null,
+      build: { xMin: -8, xMax: 8, yMin: 0, yMax: 13 },
+      anchors: [[-6, 0], [-3, 0], [0, 0], [3, 0], [6, 0]],
+      coreZone: { xMin: -5, xMax: 6, yMin: 2, yMax: 9 },
+      core: [1, 4],
+      budget: 2e4,
+      maxCannons: 3
+    }
+  };
+  var MAP_ORDER = ["strait", "plain", "ridge"];
+  var DEFAULT_MAP = "strait";
+  var isNum = (v) => typeof v === "number" && Number.isFinite(v);
+  var isInt = (v) => isNum(v) && Math.abs(v - Math.round(v)) < 1e-9;
+  var isRect = (r) => r && isInt(r.xMin) && isInt(r.xMax) && isInt(r.yMin) && isInt(r.yMax) && r.xMin < r.xMax && r.yMin < r.yMax;
+  var inRect = (r, x, y) => x >= r.xMin - EPS && x <= r.xMax + EPS && y >= r.yMin - EPS && y <= r.yMax + EPS;
+  function fullGround(raw) {
+    const pts = raw.ground.map(([x, y]) => [x, y]);
+    if (pts[0][0] > -FAR) pts.unshift([-FAR, pts[0][1]]);
+    const half = raw.fieldW / 2;
+    if (pts[pts.length - 1][0] < half - EPS) pts.push([half, pts[pts.length - 1][1]]);
+    return pts;
   }
-  function worldAngle(side, a) {
-    return side === 1 || side === "enemy" ? Math.PI - a : a;
+  function validateMap(raw) {
+    try {
+      return validateMapInner(raw);
+    } catch {
+      return "\u5730\u56FE\u6570\u636E\u7684\u683C\u5F0F\u4E0D\u5BF9";
+    }
+  }
+  function validateMapInner(raw) {
+    if (!raw || typeof raw !== "object") return "\u5730\u56FE\u5FC5\u987B\u662F\u4E00\u4E2A\u5BF9\u8C61";
+    if (!isInt(raw.fieldW) || raw.fieldW < 16 || raw.fieldW > 60) return "\u573A\u5730\u5BBD\u5EA6\u8981\u662F 16 \u5230 60 \u4E4B\u95F4\u7684\u6574\u6570";
+    const half = raw.fieldW / 2;
+    if (!Array.isArray(raw.ground) || raw.ground.length < 1 || raw.ground.length > 40) return "\u5730\u9762\u8F6E\u5ED3\u8981\u6709 1 \u5230 40 \u4E2A\u70B9";
+    let px2 = -Infinity, py2 = null;
+    for (const p of raw.ground) {
+      if (!Array.isArray(p) || !isNum(p[0]) || !isNum(p[1])) return "\u5730\u9762\u8F6E\u5ED3\u7684\u70B9\u5E94\u4E3A [x, y]";
+      if (Math.abs(p[0] * 2 - Math.round(p[0] * 2)) > 1e-9 || Math.abs(p[1] * 2 - Math.round(p[1] * 2)) > 1e-9) return "\u5730\u9762\u8F6E\u5ED3\u7684\u70B9\u8981\u843D\u5728\u534A\u7C73\u7F51\u683C\u4E0A";
+      if (p[0] < -FAR || p[0] > half + EPS) return "\u5730\u9762\u8F6E\u5ED3\u4E0D\u80FD\u8D8A\u8FC7\u4E2D\u7EBF";
+      if (p[1] < -40 || p[1] > 40) return "\u5730\u9762\u9AD8\u5EA6\u8981\u5728 -40 \u5230 40 \u4E4B\u95F4";
+      if (p[0] < px2 - EPS) return "\u5730\u9762\u8F6E\u5ED3\u7684 x \u4E0D\u80FD\u5F80\u56DE\u8D70";
+      if (Math.abs(p[0] - px2) < EPS && Math.abs(p[1] - py2) < EPS) return "\u5730\u9762\u8F6E\u5ED3\u6709\u91CD\u590D\u7684\u70B9";
+      px2 = p[0];
+      py2 = p[1];
+    }
+    for (let i = 2; i < raw.ground.length; i++) {
+      if (Math.abs(raw.ground[i][0] - raw.ground[i - 2][0]) < EPS) return "\u540C\u4E00\u4E2A\u4F4D\u7F6E\u6700\u591A\u653E\u4E24\u4E2A\u70B9\uFF08\u4E00\u9053\u5D16\u58C1\uFF09\uFF0C\u4E0D\u80FD\u6298\u56DE\u53BB";
+    }
+    const gl = raw.ground.length;
+    if (gl >= 2 && raw.ground[gl - 1][0] > half - EPS && raw.ground[gl - 2][0] > half - EPS) return "\u4E2D\u7EBF\u4E0A\u4E0D\u80FD\u6709\u7AD6\u76F4\u7684\u5D16\u58C1";
+    if (!(raw.water === null || raw.water === void 0 || isNum(raw.water) && raw.water >= -40 && raw.water <= 40)) return "\u6C34\u9762\u9AD8\u5EA6\u65E0\u6548";
+    if (!isRect(raw.build)) return "\u5EFA\u9020\u8303\u56F4\u65E0\u6548";
+    const B = raw.build;
+    if (B.xMin < -30 || B.xMax > half - 1 || B.yMin < -30 || B.yMax > 40) return "\u5EFA\u9020\u8303\u56F4\u592A\u5927\uFF0C\u6216\u8005\u8D8A\u8FC7\u4E86\u4E2D\u7EBF\uFF08\u79BB\u4E2D\u7EBF\u81F3\u5C11\u7559 1 \u7C73\uFF09";
+    if (B.xMax - B.xMin > 30 || B.yMax - B.yMin > 30) return "\u5EFA\u9020\u8303\u56F4\u6700\u591A 30 \u7C73\u89C1\u65B9";
+    if (!Array.isArray(raw.anchors) || raw.anchors.length < 1 || raw.anchors.length > 12) return "\u951A\u70B9\u8981\u6709 1 \u5230 12 \u4E2A";
+    for (const a of raw.anchors) if (!Array.isArray(a) || !isInt(a[0]) || !isInt(a[1])) return "\u951A\u70B9\u5E94\u4E3A\u6574\u6570\u5750\u6807 [x, y]";
+    if (!isRect(raw.coreZone)) return "\u6838\u5FC3\u8303\u56F4\u65E0\u6548";
+    if (!Array.isArray(raw.core) || !isInt(raw.core[0]) || !isInt(raw.core[1])) return "\u6838\u5FC3\u9ED8\u8BA4\u4F4D\u7F6E\u5E94\u4E3A\u6574\u6570\u5750\u6807 [x, y]";
+    const M = compileUnchecked(raw);
+    const seen = /* @__PURE__ */ new Set();
+    for (const a of raw.anchors) {
+      if (!inRect(B, a[0], a[1])) return `\u951A\u70B9 (${a}) \u5728\u5EFA\u9020\u8303\u56F4\u4E4B\u5916`;
+      if (!M.onSurface(a[0], a[1])) return `\u951A\u70B9 (${a}) \u6CA1\u6709\u8D34\u5728\u5730\u9762\u4E0A`;
+      const k = a[0] + "," + a[1];
+      if (seen.has(k)) return "\u951A\u70B9\u91CD\u590D";
+      seen.add(k);
+    }
+    const Z = raw.coreZone;
+    if (Z.xMin < B.xMin || Z.xMax > B.xMax || Z.yMin < B.yMin || Z.yMax > B.yMax) return "\u6838\u5FC3\u8303\u56F4\u8981\u5728\u5EFA\u9020\u8303\u56F4\u4EE5\u5185";
+    if (!inRect(Z, raw.core[0], raw.core[1])) return "\u6838\u5FC3\u9ED8\u8BA4\u4F4D\u7F6E\u8981\u5728\u6838\u5FC3\u8303\u56F4\u4EE5\u5185";
+    if (M.inside(raw.core[0], raw.core[1]) || M.onSurface(raw.core[0], raw.core[1])) return "\u6838\u5FC3\u9ED8\u8BA4\u4F4D\u7F6E\u4E0D\u80FD\u5728\u5730\u91CC\u6216\u8D34\u7740\u5730\u9762";
+    if (seen.has(raw.core[0] + "," + raw.core[1])) return "\u6838\u5FC3\u9ED8\u8BA4\u4F4D\u7F6E\u548C\u951A\u70B9\u91CD\u53E0";
+    if (M.hasWater && raw.core[1] <= M.waterY) return "\u6838\u5FC3\u9ED8\u8BA4\u4F4D\u7F6E\u4E0D\u80FD\u5728\u6C34\u9762\u4EE5\u4E0B";
+    if (!isInt(raw.budget) || raw.budget < 1e3 || raw.budget > 2e5) return "\u9884\u7B97\u8981\u662F 1000 \u5230 200000 \u4E4B\u95F4\u7684\u6574\u6570";
+    if (!isInt(raw.maxCannons) || raw.maxCannons < 1 || raw.maxCannons > 8) return "\u706B\u70AE\u4E0A\u9650\u8981\u662F 1 \u5230 8";
+    return null;
+  }
+  function compileUnchecked(raw) {
+    const W = raw.fieldW;
+    const local = fullGround(raw);
+    const pts = local.map(([x, y]) => [x, y]);
+    for (let i = local.length - 1; i >= 0; i--) pts.push([W - local[i][0], local[i][1]]);
+    const clean = [];
+    for (const p of pts) {
+      const q = clean[clean.length - 1];
+      if (q && Math.abs(q[0] - p[0]) < EPS && Math.abs(q[1] - p[1]) < EPS) continue;
+      const o = clean[clean.length - 2];
+      if (o && Math.abs((q[0] - o[0]) * (p[1] - o[1]) - (q[1] - o[1]) * (p[0] - o[0])) < 1e-9 && (q[0] - o[0]) * (p[0] - q[0]) + (q[1] - o[1]) * (p[1] - q[1]) > 0) clean.pop();
+      clean.push(p);
+    }
+    const segs = [];
+    let gMax = -Infinity, gMin = Infinity;
+    for (let i = 0; i < clean.length - 1; i++) {
+      const [ax, ay] = clean[i], [bx, by] = clean[i + 1];
+      const ex = bx - ax, ey = by - ay, len = Math.hypot(ex, ey);
+      const kind = ay === by ? "h" : ax === bx ? "v" : "s";
+      segs.push({
+        i,
+        ax,
+        ay,
+        bx,
+        by,
+        ex,
+        ey,
+        len2: ex * ex + ey * ey,
+        kind,
+        yLo: Math.min(ay, by),
+        yHi: Math.max(ay, by),
+        tx: ex / len,
+        ty: ey / len,
+        // 沿地面的切向
+        walk: Math.abs(ex / len) > 0.5,
+        // 坡度不到 60 度：按地面处理摩擦；更陡的按崖壁
+        slope: kind === "s" ? ey / ex : 0
+      });
+      gMax = Math.max(gMax, ay, by);
+      gMin = Math.min(gMin, ay, by);
+    }
+    const flat = segs.filter((s) => s.kind !== "v");
+    const hasWater = isNum(raw.water);
+    const waterY = hasWater ? raw.water : -Infinity;
+    const yAt = (s, x) => s.kind === "h" ? s.ay : s.ay + (x - s.ax) * s.slope;
+    const groundIn = (x) => {
+      let g = Infinity;
+      for (let k = 0; k < flat.length; k++) {
+        const s = flat[k];
+        if (x >= s.ax && x <= s.bx) {
+          const v = yAt(s, x);
+          if (v < g) g = v;
+        }
+      }
+      return g === Infinity ? x < flat[0].ax ? flat[0].ay : flat[flat.length - 1].by : g;
+    };
+    const groundTop = (x) => {
+      let g = -Infinity;
+      for (let k = 0; k < flat.length; k++) {
+        const s = flat[k];
+        if (x >= s.ax && x <= s.bx) {
+          const v = yAt(s, x);
+          if (v > g) g = v;
+        }
+      }
+      return g === -Infinity ? x < flat[0].ax ? flat[0].ay : flat[flat.length - 1].by : g;
+    };
+    const inside = (x, y) => y < groundIn(x) - EPS;
+    const pushOut = (x, y, out) => {
+      let best = Infinity, bx = x, by = y, bc = 0, bh = false;
+      for (let k = 0; k < segs.length; k++) {
+        const s = segs[k];
+        let cx, cy, d, c;
+        if (s.kind === "h") {
+          cy = s.ay;
+          c = 1;
+          if (x < s.ax) {
+            cx = s.ax;
+            d = Math.hypot(x - cx, y - cy);
+          } else if (x > s.bx) {
+            cx = s.bx;
+            d = Math.hypot(x - cx, y - cy);
+          } else {
+            cx = x;
+            d = Math.abs(y - cy);
+          }
+        } else if (s.kind === "v") {
+          cx = s.ax;
+          c = 2;
+          if (y < s.yLo) {
+            cy = s.yLo;
+            d = Math.hypot(x - cx, y - cy);
+          } else if (y > s.yHi) {
+            cy = s.yHi;
+            d = Math.hypot(x - cx, y - cy);
+          } else {
+            cy = y;
+            d = Math.abs(x - cx);
+          }
+        } else {
+          let t = ((x - s.ax) * s.ex + (y - s.ay) * s.ey) / s.len2;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          cx = s.ax + s.ex * t;
+          cy = s.ay + s.ey * t;
+          c = 3 + k;
+          d = Math.hypot(x - cx, y - cy);
+        }
+        if (d < best || d === best && s.kind === "h" && !bh) {
+          best = d;
+          bx = cx;
+          by = cy;
+          bc = c;
+          bh = s.kind === "h";
+        }
+      }
+      out.x = bx;
+      out.y = by;
+      out.c = bc;
+      return out;
+    };
+    const onSurface = (x, y, tol = 1e-4) => {
+      for (let k = 0; k < segs.length; k++) {
+        const s = segs[k];
+        let t = ((x - s.ax) * s.ex + (y - s.ay) * s.ey) / s.len2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        if (Math.hypot(x - (s.ax + s.ex * t), y - (s.ay + s.ey * t)) < tol) return true;
+      }
+      return false;
+    };
+    const segCrosses = (x1, y1, x2, y2) => {
+      const dx = x2 - x1, dy = y2 - y1;
+      if (Math.abs(dx) < 1e-12) return Math.min(y1, y2) < groundIn(x1) - EPS;
+      const xl = Math.min(x1, x2), xr = Math.max(x1, x2);
+      for (let k = 0; k < flat.length; k++) {
+        const s = flat[k];
+        const lo = Math.max(xl, s.ax), hi = Math.min(xr, s.bx);
+        if (hi - lo <= EPS) continue;
+        const ya = y1 + dy * (lo - x1) / dx, yb = y1 + dy * (hi - x1) / dx;
+        if (ya < yAt(s, lo) - EPS || yb < yAt(s, hi) - EPS) return true;
+      }
+      return false;
+    };
+    const waterSpans = [];
+    if (hasWater) {
+      const add = (a, b) => {
+        if (b - a < 1e-6) return;
+        const last = waterSpans[waterSpans.length - 1];
+        if (last && a - last[1] < 1e-6) last[1] = b;
+        else waterSpans.push([a, b]);
+      };
+      for (const s of flat) {
+        const da = s.ay - waterY, db = s.by - waterY;
+        if (da < 0 && db < 0) add(s.ax, s.bx);
+        else if (da < 0 || db < 0) {
+          const xc = s.ax + (s.bx - s.ax) * (da / (da - db));
+          if (da < 0) add(s.ax, xc);
+          else add(xc, s.bx);
+        }
+      }
+    }
+    return {
+      waterSpans,
+      /** 这个点所在的地表朝哪：'down' 平地（或坡面），'wall' 竖直的崖壁（锚点画法用） */
+      surfaceKind: (x, y) => y < groundTop(x) - 1e-6 ? "wall" : "down",
+      id: raw.id || "custom",
+      name: raw.name || "\u81EA\u5B9A\u4E49\u5730\u56FE",
+      fieldW: W,
+      half: W / 2,
+      hasWater,
+      water: hasWater ? raw.water : null,
+      waterY,
+      killY: hasWater ? raw.water - 5.5 : -Infinity,
+      // 沉到这里以下的节点直接移除
+      build: { ...raw.build },
+      anchors: (raw.anchors || []).map(([x, y]) => [x, y]),
+      coreZone: raw.coreZone ? { ...raw.coreZone } : null,
+      core: raw.core ? [raw.core[0], raw.core[1]] : null,
+      budget: raw.budget,
+      maxCannons: raw.maxCannons,
+      ground: raw.ground.map(([x, y]) => [x, y]),
+      localGround: local,
+      worldGround: clean,
+      segs,
+      flat,
+      gMax,
+      gMin,
+      groundIn,
+      groundTop,
+      inside,
+      pushOut,
+      onSurface,
+      segCrosses,
+      /** 本地坐标 → 世界坐标 */
+      worldX: (side, x) => side === 1 || side === "enemy" ? W - x : x,
+      /** 对方核心默认位置在己方本地坐标里的位置 */
+      foeCore: raw.core ? [W - raw.core[0], raw.core[1]] : null,
+      raw
+    };
+  }
+  function compileMapLoose(raw) {
+    return compileUnchecked(raw);
+  }
+  var compiled = /* @__PURE__ */ new WeakMap();
+  var builtin = /* @__PURE__ */ new Map();
+  function getMap(m) {
+    if (m && m.segs) return m;
+    if (m === void 0 || m === null) m = DEFAULT_MAP;
+    if (typeof m === "string") {
+      if (!MAPS[m]) {
+        const e = new Error(`\u6CA1\u6709\u540D\u53EB ${m} \u7684\u5730\u56FE`);
+        e.mapError = true;
+        throw e;
+      }
+      if (!builtin.has(m)) builtin.set(m, compileUnchecked(MAPS[m]));
+      return builtin.get(m);
+    }
+    let M = compiled.get(m);
+    if (!M) {
+      const why = validateMap(m);
+      if (why) {
+        const e = new Error("\u5730\u56FE\u4E0D\u53EF\u7528\uFF1A" + why);
+        e.mapError = true;
+        throw e;
+      }
+      M = compileUnchecked(m);
+      compiled.set(m, M);
+    }
+    return M;
+  }
+  function mapData(m) {
+    const M = getMap(m);
+    return {
+      id: M.id,
+      name: M.name,
+      fieldW: M.fieldW,
+      ground: M.ground.map(([x, y]) => [x, y]),
+      water: M.water,
+      build: { ...M.build },
+      anchors: M.anchors.map(([x, y]) => [x, y]),
+      coreZone: { ...M.coreZone },
+      core: [...M.core],
+      budget: M.budget,
+      maxCannons: M.maxCannons
+    };
   }
 
   // src/view.js
-  var FIELD_BOUNDS = { xMin: -11, xMax: CFG.fieldW + 11, yMin: -8.5, yMax: 19 };
-  var BUILD_BOUNDS = { xMin: -10, xMax: 11, yMin: -7, yMax: 13 };
+  function fieldBounds(M) {
+    const B = M.build;
+    let lo = Infinity, hi = M.gMax;
+    for (const [x, y] of M.worldGround) if (x >= B.xMin - 3 && x <= M.fieldW - B.xMin + 3) lo = Math.min(lo, y);
+    lo = Math.min(lo, M.groundIn(B.xMin - 3));
+    const yMin = M.hasWater ? M.waterY - 2.5 : Math.min(lo, B.yMin) - 3;
+    return { xMin: B.xMin - 3, xMax: M.fieldW - B.xMin + 3, yMin, yMax: Math.max(B.yMax + 8, hi + 6) };
+  }
+  function buildBounds(M) {
+    const B = M.build;
+    return { xMin: B.xMin - 2, xMax: B.xMax + 3, yMin: B.yMin - 3, yMax: B.yMax + 2 };
+  }
   var View = class {
-    constructor() {
-      this.cx = CFG.fieldW / 2;
-      this.cy = 5;
-      this.ppm = 24;
+    constructor(map) {
       this.w = 1280;
       this.h = 720;
       this.minPpm = 10;
       this.maxPpm = 110;
       this._anim = null;
+      this.setMap(map);
+      this.cx = this.map.fieldW / 2;
+      this.cy = 5;
+      this.ppm = 24;
+    }
+    /** 换地图：取景范围跟着地图走 */
+    setMap(map) {
+      this.map = getMap(map);
+      this.fieldB = fieldBounds(this.map);
+      this.buildB = buildBounds(this.map);
+      this.resize(this.w, this.h);
     }
     resize(w, h) {
       this.w = w;
       this.h = h;
-      this.minPpm = Math.min(w / (FIELD_BOUNDS.xMax - FIELD_BOUNDS.xMin + 30), h / (FIELD_BOUNDS.yMax - FIELD_BOUNDS.yMin + 14));
+      const F2 = this.fieldB;
+      this.minPpm = Math.min(w / (F2.xMax - F2.xMin + 30), h / (F2.yMax - F2.yMin + 14));
     }
     // ---- 坐标换算 ----
     sx(x) {
@@ -230,8 +607,9 @@
       this._clamp();
     }
     _clamp() {
-      this.cx = Math.min(FIELD_BOUNDS.xMax + 4, Math.max(FIELD_BOUNDS.xMin - 4, this.cx));
-      this.cy = Math.min(FIELD_BOUNDS.yMax + 6, Math.max(FIELD_BOUNDS.yMin - 2, this.cy));
+      const F2 = this.fieldB;
+      this.cx = Math.min(F2.xMax + 4, Math.max(F2.xMin - 4, this.cx));
+      this.cy = Math.min(F2.yMax + 6, Math.max(F2.yMin - 2, this.cy));
     }
     /** 让给定世界范围刚好落进视口（留出边距，单位像素）后的目标值 */
     fitTarget(b, pad = { l: 24, r: 24, t: 24, b: 24 }) {
@@ -287,8 +665,12 @@
       // 交火时限（秒）
       drawMargin: 0,
       // 超时判定：核心耐久相差不超过「上限 × 这个比例」算平局
-      needCannon: false
+      needCannon: false,
       // 参赛堡垒必须至少有一门能开火的炮
+      coreZone: false,
+      // 核心固定在地图给的默认位置
+      coreGroundKill: false
+      // 核心碰到地面没事
     },
     // v2：2026-11-16 起。把「材料、结构、火力」连起来的第一批修正
     v2: {
@@ -308,7 +690,12 @@
       // 两根杆不能有一段叠在同一条线上（否则同一个位置能叠出好几份耐久和强度）
       battleTime: 120,
       drawMargin: 0.02,
-      needCannon: true
+      needCannon: true,
+      // 2026-11-16 追加（v2 还没有用于正式比赛，所以直接加在这里）：场地改成可换的地图
+      coreZone: true,
+      // 核心可以放在地图给的核心范围里的任意网格点
+      coreGroundKill: true
+      // 核心碰到地面就毁：没有水的地图上，核心也得靠结构托在半空
     }
   };
   var CURRENT_RULES = "v2";
@@ -318,39 +705,19 @@
   }
 
   // src/sim/blueprint.js
-  var EPS = 1e-6;
+  var EPS2 = 1e-6;
   var DEG = Math.PI / 180;
-  function insideCliffLocal(x, y) {
-    return x < -EPS && y < -EPS;
-  }
-  function onGroundLocal(x, y) {
-    return Math.abs(y) < 1e-4 && x < 1e-4 || Math.abs(x) < 1e-4 && y < 1e-4;
-  }
-  function segCrossesCliff(x1, y1, x2, y2) {
-    let t0 = 0, t1 = 1;
-    const dx = x2 - x1, dy = y2 - y1;
-    if (Math.abs(dx) < 1e-12) {
-      if (!(x1 < -EPS)) return false;
-    } else {
-      const tc = (-EPS - x1) / dx;
-      if (dx > 0) t1 = Math.min(t1, tc);
-      else t0 = Math.max(t0, tc);
-      if (t0 >= t1) return false;
-    }
-    const ya = y1 + dy * t0, yb = y1 + dy * t1;
-    if (Math.min(ya, yb) >= -EPS) return false;
-    const tm = (t0 + t1) / 2;
-    const lo = ya < yb ? t0 : t1;
-    const ts = lo + (tm - lo) * 1e-6;
-    return insideCliffLocal(x1 + dx * ts, y1 + dy * ts) || insideCliffLocal(x1 + dx * tm, y1 + dy * tm);
-  }
-  var isNum = (v) => typeof v === "number" && Number.isFinite(v);
+  var isNum2 = (v) => typeof v === "number" && Number.isFinite(v);
   var hasMat = (m) => typeof m === "string" && Object.prototype.hasOwnProperty.call(MATERIALS, m);
   var Blueprint = class _Blueprint {
-    /** @param rules 规则版本号或规则对象，不传就是当前版本（见 rules.js）。决定炮座规则和计价方式 */
-    constructor(side = "player", rules2) {
+    /**
+     * @param rules 规则版本号或规则对象，不传就是当前版本（见 rules.js）。决定炮座规则和计价方式
+     * @param map   地图名字或地图数据，不传就是默认地图（见 map.js）。决定地形、锚点、建造范围和核心范围
+     */
+    constructor(side = "player", rules2, map) {
       this.side = side;
       this.rules = getRules(rules2);
+      this.map = getMap(map);
       this.nodes = /* @__PURE__ */ new Map();
       this.beams = /* @__PURE__ */ new Map();
       this.cannons = /* @__PURE__ */ new Map();
@@ -363,8 +730,8 @@
       this.beams.clear();
       this.cannons.clear();
       this._next = 1;
-      for (const [x, y] of CFG.anchors) this._putNode(x, y, "anchor");
-      this._putNode(CFG.corePos[0], CFG.corePos[1], "core");
+      for (const [x, y] of this.map.anchors) this._putNode(x, y, "anchor");
+      this._putNode(this.map.core[0], this.map.core[1], "core");
     }
     _putNode(x, y, kind) {
       const id = this._next++;
@@ -476,21 +843,35 @@
     // ---------- 校验 ----------
     /** 返回 null 表示可放置，否则返回原因（给玩家看的中文短语） */
     checkNodePos(x, y) {
-      if (!isNum(x) || !isNum(y)) return "\u5750\u6807\u65E0\u6548";
-      const B = CFG.build;
-      if (x < B.xMin - EPS || x > B.xMax + EPS || y < B.yMin - EPS || y > B.yMax + EPS) return "\u8D85\u51FA\u5EFA\u9020\u533A";
-      if (insideCliffLocal(x, y)) return "\u4E0D\u80FD\u5EFA\u5728\u5C71\u4F53\u91CC";
+      if (!isNum2(x) || !isNum2(y)) return "\u5750\u6807\u65E0\u6548";
+      const B = this.map.build;
+      if (x < B.xMin - EPS2 || x > B.xMax + EPS2 || y < B.yMin - EPS2 || y > B.yMax + EPS2) return "\u8D85\u51FA\u5EFA\u9020\u533A";
+      if (this.map.inside(x, y)) return "\u4E0D\u80FD\u5EFA\u5728\u5C71\u4F53\u91CC";
+      return null;
+    }
+    /** 核心能不能放在这里。规则不允许挪核心时，只有地图的默认位置合法。返回 null 或原因 */
+    checkCorePos(x, y) {
+      if (!isNum2(x) || !isNum2(y)) return "\u5750\u6807\u65E0\u6548";
+      const M = this.map;
+      if (!this.rules.coreZone) return Math.abs(x - M.core[0]) < 1e-6 && Math.abs(y - M.core[1]) < 1e-6 ? null : "\u8FD9\u5957\u89C4\u5219\u4E0B\u6838\u5FC3\u4E0D\u80FD\u79FB\u52A8";
+      const g = CFG.grid;
+      if (Math.abs(x / g - Math.round(x / g)) > 1e-6 || Math.abs(y / g - Math.round(y / g)) > 1e-6) return "\u6838\u5FC3\u8981\u653E\u5728\u7F51\u683C\u70B9\u4E0A";
+      const Z = M.coreZone;
+      if (x < Z.xMin - EPS2 || x > Z.xMax + EPS2 || y < Z.yMin - EPS2 || y > Z.yMax + EPS2) return "\u8D85\u51FA\u6838\u5FC3\u8303\u56F4";
+      if (M.inside(x, y)) return "\u6838\u5FC3\u4E0D\u80FD\u653E\u5728\u5C71\u4F53\u91CC";
+      if (M.onSurface(x, y)) return "\u6838\u5FC3\u4E0D\u80FD\u8D34\u7740\u5730\u9762";
+      if (M.hasWater && y <= M.waterY + EPS2) return "\u6838\u5FC3\u4E0D\u80FD\u653E\u5728\u6C34\u9762\u4EE5\u4E0B";
       return null;
     }
     /** 检查两点之间能否用该材料连杆（不看是否已有节点）。返回 null 或原因 */
     checkSpan(mat2, x1, y1, x2, y2) {
       if (!hasMat(mat2)) return "\u672A\u77E5\u6750\u6599";
-      if (!isNum(x1) || !isNum(y1) || !isNum(x2) || !isNum(y2)) return "\u5750\u6807\u65E0\u6548";
+      if (!isNum2(x1) || !isNum2(y1) || !isNum2(x2) || !isNum2(y2)) return "\u5750\u6807\u65E0\u6548";
       const m = MATERIALS[mat2];
       const len = Math.hypot(x2 - x1, y2 - y1);
       if (len < 0.5) return "\u592A\u77ED";
       if (len > m.maxLen + 1e-4) return `${m.name}\u6700\u957F ${m.maxLen} \u7C73`;
-      if (segCrossesCliff(x1, y1, x2, y2)) return "\u4E0D\u80FD\u7A7F\u8FC7\u5C71\u4F53";
+      if (this.map.segCrosses(x1, y1, x2, y2)) return "\u4E0D\u80FD\u7A7F\u8FC7\u5C71\u4F53";
       return null;
     }
     _checkCannonBeam(mat2, x1, y1, x2, y2) {
@@ -505,7 +886,7 @@
     _checkCannonEnds(ka, x1, y1, kb, x2, y2) {
       const R2 = this.rules;
       if (!R2.anchorMounts && (ka === "anchor" || kb === "anchor")) return "\u70AE\u5EA7\u4E0D\u80FD\u63A5\u5728\u951A\u70B9\u4E0A";
-      if (!R2.groundMounts && (onGroundLocal(x1, y1) || onGroundLocal(x2, y2))) return "\u70AE\u5EA7\u4E0D\u80FD\u8D34\u7740\u5730\u9762";
+      if (!R2.groundMounts && (this.map.onSurface(x1, y1) || this.map.onSurface(x2, y2))) return "\u70AE\u5EA7\u4E0D\u80FD\u8D34\u7740\u5730\u9762";
       return null;
     }
     /** 这根杆上能不能架炮。返回 null 或原因（不检查数量上限时传 ignoreLimit=true） */
@@ -513,7 +894,7 @@
       const bm = this.beams.get(beamId);
       if (!bm) return "\u6746\u4EF6\u4E0D\u5B58\u5728";
       if (this.cannonOn(beamId)) return "\u8FD9\u6839\u6746\u4E0A\u5DF2\u7ECF\u6709\u706B\u70AE";
-      if (!ignoreLimit && this.cannons.size >= CFG.maxCannons) return `\u6700\u591A ${CFG.maxCannons} \u95E8\u706B\u70AE`;
+      if (!ignoreLimit && this.cannons.size >= this.map.maxCannons) return `\u6700\u591A ${this.map.maxCannons} \u95E8\u706B\u70AE`;
       const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
       return this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
     }
@@ -566,13 +947,14 @@
       this.nodes.delete(id);
       return { ok: true };
     }
-    /** 拖动节点。任何相连杆件超长 / 穿山 / 炮座失效都会拒绝 */
+    /** 拖动节点。任何相连杆件超长 / 穿山 / 炮座失效都会拒绝。核心只能在地图给的核心范围里挪（规则允许时） */
     moveNode(id, x, y) {
       const n = this.nodes.get(id);
       if (!n) return { ok: false, reason: "\u8282\u70B9\u4E0D\u5B58\u5728" };
-      if (n.kind !== "free") return { ok: false, reason: n.kind === "core" ? "\u6838\u5FC3\u4E0D\u80FD\u79FB\u52A8" : "\u951A\u70B9\u4E0D\u80FD\u79FB\u52A8" };
+      if (n.kind === "anchor") return { ok: false, reason: "\u951A\u70B9\u4E0D\u80FD\u79FB\u52A8" };
       if (Math.abs(n.x - x) < 1e-6 && Math.abs(n.y - y) < 1e-6) return { ok: true };
-      const why = this.checkNodePos(x, y);
+      if (n.kind === "core" && !this.rules.coreZone) return { ok: false, reason: "\u6838\u5FC3\u4E0D\u80FD\u79FB\u52A8" };
+      const why = n.kind === "core" ? this.checkCorePos(x, y) : this.checkNodePos(x, y);
       if (why) return { ok: false, reason: why };
       const hit = this.nodeAt(x, y);
       if (hit && hit.id !== id) return { ok: false, reason: "\u90A3\u91CC\u5DF2\u7ECF\u6709\u8282\u70B9" };
@@ -608,6 +990,10 @@
       n.y = y;
       return { ok: true };
     }
+    /** 把核心放到 (x, y)。和拖动核心节点是一回事 */
+    setCore(x, y) {
+      return this.moveNode(this.coreNode().id, x, y);
+    }
     setBeamMat(id, mat2) {
       const bm = this.beams.get(id);
       if (!bm) return { ok: false, reason: "\u6746\u4EF6\u4E0D\u5B58\u5728" };
@@ -621,11 +1007,11 @@
       return { ok: true };
     }
     addCannon(beamId, angle = 45 * DEG) {
-      if (!isNum(angle)) return { ok: false, reason: "\u5C04\u89D2\u65E0\u6548" };
+      if (!isNum2(angle)) return { ok: false, reason: "\u5C04\u89D2\u65E0\u6548" };
       const bm = this.beams.get(beamId);
       if (!bm) return { ok: false, reason: "\u6746\u4EF6\u4E0D\u5B58\u5728" };
       if (this.cannonOn(beamId)) return { ok: false, reason: "\u8FD9\u6839\u6746\u4E0A\u5DF2\u7ECF\u6709\u706B\u70AE" };
-      if (this.cannons.size >= CFG.maxCannons) return { ok: false, reason: `\u6700\u591A ${CFG.maxCannons} \u95E8\u706B\u70AE` };
+      if (this.cannons.size >= this.map.maxCannons) return { ok: false, reason: `\u6700\u591A ${this.map.maxCannons} \u95E8\u706B\u70AE` };
       const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
       const why = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
       if (why) return { ok: false, reason: why };
@@ -658,7 +1044,7 @@
     setCannonAngle(id, angle) {
       const c = this.cannons.get(id);
       if (!c) return { ok: false, reason: "\u706B\u70AE\u4E0D\u5B58\u5728" };
-      if (!isNum(angle)) return { ok: false, reason: "\u5C04\u89D2\u65E0\u6548" };
+      if (!isNum2(angle)) return { ok: false, reason: "\u5C04\u89D2\u65E0\u6548" };
       c.angle = clampAngle(angle);
       return { ok: true };
     }
@@ -678,8 +1064,8 @@
         cannons: [...this.cannons.values()].map((c) => [c.id, c.beam, +(c.angle / DEG).toFixed(3)])
       };
     }
-    static fromJSON(o, side = "player", rules2) {
-      const bp = new _Blueprint(side, rules2);
+    static fromJSON(o, side = "player", rules2, map) {
+      const bp = new _Blueprint(side, rules2, map);
       bp.nodes.clear();
       bp.beams.clear();
       bp.cannons.clear();
@@ -690,10 +1076,10 @@
       return bp;
     }
     clone(side = this.side) {
-      return _Blueprint.fromJSON(this.toJSON(), side, this.rules);
+      return _Blueprint.fromJSON(this.toJSON(), side, this.rules, this.map);
     }
     /**
-     * 完整性检查（读取存档后用）：锚点和核心齐全且在原位、节点不重叠且位置合法、
+     * 完整性检查（读取存档后用）：锚点齐全且在原位、核心在允许的位置、节点不重叠且位置合法、
      * 杆件和火炮都满足建造规则。返回 null 表示合法，否则返回第一条问题。
      * 同时把 id 分配器校正到最大 id 之后。
      */
@@ -705,7 +1091,7 @@
         if (!Number.isInteger(n.id) || n.id < 1 || ids.has(n.id)) return "\u8282\u70B9 id \u65E0\u6548";
         ids.add(n.id);
         maxId = Math.max(maxId, n.id);
-        if (!isNum(n.x) || !isNum(n.y)) return "\u8282\u70B9\u5750\u6807\u65E0\u6548";
+        if (!isNum2(n.x) || !isNum2(n.y)) return "\u8282\u70B9\u5750\u6807\u65E0\u6548";
         const key = `${Math.round(n.x * 1e3)},${Math.round(n.y * 1e3)}`;
         if (seen.has(key)) return "\u8282\u70B9\u91CD\u53E0";
         seen.add(key);
@@ -714,15 +1100,18 @@
           if (w) return w;
         } else if (n.kind !== "anchor" && n.kind !== "core") return "\u8282\u70B9\u7C7B\u578B\u65E0\u6548";
       }
-      for (const [x, y] of CFG.anchors) {
+      const M = this.map;
+      for (const [x, y] of M.anchors) {
         const n = this.nodeAt(x, y);
         if (!n || n.kind !== "anchor") return "\u7F3A\u5C11\u951A\u70B9";
       }
-      const core = this.nodeAt(CFG.corePos[0], CFG.corePos[1]);
-      if (!core || core.kind !== "core") return "\u7F3A\u5C11\u6838\u5FC3";
+      const core = this.coreNode();
+      if (!core) return "\u7F3A\u5C11\u6838\u5FC3";
+      const cw = this.checkCorePos(core.x, core.y);
+      if (cw) return cw === "\u8FD9\u5957\u89C4\u5219\u4E0B\u6838\u5FC3\u4E0D\u80FD\u79FB\u52A8" ? "\u7F3A\u5C11\u6838\u5FC3" : cw;
       let fixed = 0;
       for (const n of this.nodes.values()) if (n.kind !== "free") fixed++;
-      if (fixed !== CFG.anchors.length + 1) return "\u951A\u70B9\u6216\u6838\u5FC3\u6570\u91CF\u4E0D\u5BF9";
+      if (fixed !== M.anchors.length + 1) return "\u951A\u70B9\u6216\u6838\u5FC3\u6570\u91CF\u4E0D\u5BF9";
       const pairs = /* @__PURE__ */ new Set();
       for (const bm of this.beams.values()) {
         if (!Number.isInteger(bm.id) || bm.id < 1 || ids.has(bm.id)) return "\u6746\u4EF6 id \u65E0\u6548";
@@ -737,14 +1126,14 @@
         if (w) return w;
         if (this.rules.noOverlap && this._overlapping(a.x, a.y, b.x, b.y, /* @__PURE__ */ new Set([bm.id]))) return "\u6709\u6746\u4EF6\u91CD\u53E0";
       }
-      if (this.cannons.size > CFG.maxCannons) return "\u706B\u70AE\u592A\u591A";
+      if (this.cannons.size > M.maxCannons) return "\u706B\u70AE\u592A\u591A";
       const mounts = /* @__PURE__ */ new Set();
       for (const c of this.cannons.values()) {
         if (!Number.isInteger(c.id) || c.id < 1 || ids.has(c.id)) return "\u706B\u70AE id \u65E0\u6548";
         ids.add(c.id);
         maxId = Math.max(maxId, c.id);
         const bm = this.beams.get(c.beam);
-        if (!bm || mounts.has(c.beam) || !isNum(c.angle)) return "\u706B\u70AE\u65E0\u6548";
+        if (!bm || mounts.has(c.beam) || !isNum2(c.angle)) return "\u706B\u70AE\u65E0\u6548";
         mounts.add(c.beam);
         const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
         const w = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
@@ -769,14 +1158,19 @@
     }
     /**
      * 用紧凑描述搭一座堡垒（给预设堡垒和测试用）：
+     *   core:    [x, y]            —— 可选，核心放在哪（不写就是地图的默认位置）
      *   nodes:   { 名字: [x, y] }   —— 坐标恰好落在锚点 / 核心上的会自动复用
      *   beams:   [[名字A, 名字B, 材料], ...]
      *   cannons: [[名字A, 名字B, 射角度数], ...]
      * 任何一步不合法都抛错，保证预设数据不会悄悄坏掉。
      */
-    static build(spec, side = "player", rules2) {
-      const bp = new _Blueprint(side, rules2);
+    static build(spec, side = "player", rules2, map) {
+      const bp = new _Blueprint(side, rules2, map);
       const ids = {};
+      if (spec.core) {
+        const r = bp.setCore(spec.core[0], spec.core[1]);
+        if (!r.ok) throw new Error(`\u6838\u5FC3 (${spec.core}): ${r.reason}`);
+      }
       for (const [name, [x, y]] of Object.entries(spec.nodes)) {
         const r = bp.addNode(x, y);
         if (!r.ok) throw new Error(`\u8282\u70B9 ${name} (${x},${y}): ${r.reason}`);
@@ -850,11 +1244,13 @@
     /**
      * @param {Blueprint} bpPlayer 左侧（玩家）蓝图
      * @param {Blueprint} bpEnemy  右侧（敌方）蓝图，本地坐标，这里做镜像
-     * @param {{seed?:number, peace?:boolean, rules?:string|object}} opts peace=true 时永不开火、不判胜负（只看结构受力）；
-     *   rules 是规则版本（见 rules.js），不传就用左侧蓝图自带的版本
+     * @param {{seed?:number, peace?:boolean, rules?:string|object, map?:string|object}} opts peace=true 时永不开火、不判胜负（只看结构受力）；
+     *   rules 是规则版本（见 rules.js），不传就用左侧蓝图自带的版本；map 是地图（见 map.js），不传就用左侧蓝图所在的地图
      */
     constructor(bpPlayer, bpEnemy, opts = {}) {
       this.R = opts.rules ? getRules(opts.rules) : bpPlayer.rules || getRules();
+      this.M = opts.map ? getMap(opts.map) : bpPlayer.map || getMap();
+      this._hit = { x: 0, y: 0, c: 0 };
       this.seed = opts.seed ?? 20261115;
       this.peace = !!opts.peace;
       this.rng = makeRng(this.seed);
@@ -917,7 +1313,7 @@
       let i = off;
       const nodes = [...bp.nodes.values()].sort((p, q) => p.x - q.x || p.y - q.y);
       for (const nd of nodes) {
-        this.x[i] = this.px[i] = worldX(side, nd.x);
+        this.x[i] = this.px[i] = this.M.worldX(side, nd.x);
         this.y[i] = this.py[i] = nd.y;
         this.fixed[i] = nd.kind === "anchor" ? 1 : 0;
         this.alive[i] = 1;
@@ -926,7 +1322,7 @@
         this.nodeBeams[i] = [];
         map.set(nd.id, i);
         if (nd.kind === "core") {
-          this.cores[side] = { side, node: i, hp: CORE.hp, hpMax: CORE.hp, alive: true, sunk: false, lastHit: -10 };
+          this.cores[side] = { side, node: i, hp: CORE.hp, hpMax: CORE.hp, alive: true, sunk: false, grounded: false, touched: false, lastHit: -10 };
         }
         i++;
       }
@@ -984,7 +1380,7 @@
       for (const c of cannonList) {
         const bi = beamIdx.get(c.beam);
         const b = this.beams[bi];
-        const pose = cannonPoseFrom(this.x[b.a], this.y[b.a], this.x[b.b], this.y[b.b], worldAngle(side, c.angle));
+        const pose = cannonPoseFrom(this.x[b.a], this.y[b.a], this.x[b.b], this.y[b.b], side === 1 ? Math.PI - c.angle : c.angle);
         this.cannons.push({
           idx: this.cannons.length,
           bpId: c.id,
@@ -1085,7 +1481,7 @@
       const x = this.x, y = this.y, px2 = this.px, py2 = this.py, vx = this.vx, vy = this.vy;
       const w = this.w, alive = this.alive, n = this.n;
       const beams = this.beams, nb = beams.length;
-      const W = CFG.fieldW, waterY = CFG.waterY;
+      const M = this.M, waterY = M.waterY, killY = M.killY, gMax = M.gMax, hit = this._hit;
       const g = CFG.gravity * this._gscale;
       const damp = Math.exp(-this._damp * h);
       const wdamp = Math.exp(-CFG.waterDrag * h);
@@ -1146,37 +1542,21 @@
         b.slack = false;
       }
       const contact = this.contact;
-      const seabed = CFG.seabedY;
       for (let i = 0; i < n; i++) {
         if (!alive[i] || w[i] === 0) continue;
         let c = 0;
         const yi = y[i];
-        if (yi < 0) {
-          const xi = x[i];
-          if (xi < 0) {
-            if (-yi <= -xi) {
-              y[i] = 0;
-              c = 1;
-            } else {
-              x[i] = 0;
-              c = 2;
-            }
-          } else if (xi > W) {
-            if (-yi <= xi - W) {
-              y[i] = 0;
-              c = 1;
-            } else {
-              x[i] = W;
-              c = 2;
-            }
-          }
-          if (y[i] < seabed) {
-            y[i] = seabed;
-            c = 1;
-          }
+        if (yi < gMax && yi < M.groundIn(x[i])) {
+          M.pushOut(x[i], yi, hit);
+          x[i] = hit.x;
+          y[i] = hit.y;
+          c = hit.c;
         }
         contact[i] = c;
       }
+      const c0 = this.cores[0], c1 = this.cores[1];
+      if (c0 && contact[c0.node] !== 0) c0.touched = true;
+      if (c1 && contact[c1.node] !== 0) c1.touched = true;
       if ((this._sub & 1) === 0) {
         for (let k = 0; k < nb; k++) {
           const b = beams[k];
@@ -1185,16 +1565,11 @@
           if (w[i] + w[j] === 0) continue;
           b.touch = false;
           const my = (y[i] + y[j]) * 0.5;
-          if (my >= 0) continue;
+          if (my >= gMax) continue;
           const mx = (x[i] + x[j]) * 0.5;
-          let dx = 0, dy = 0;
-          if (mx < 0) {
-            if (-my <= -mx) dy = -my;
-            else dx = -mx;
-          } else if (mx > W) {
-            if (-my <= mx - W) dy = -my;
-            else dx = W - mx;
-          } else continue;
+          if (my >= M.groundIn(mx)) continue;
+          M.pushOut(mx, my, hit);
+          const dx = hit.x - mx, dy = hit.y - my;
           b.touch = true;
           if (w[i] > 0) {
             x[i] += dx;
@@ -1211,8 +1586,16 @@
       for (let i = 0; i < n; i++) {
         if (!alive[i] || w[i] === 0) continue;
         let vxi = (x[i] - px2[i]) * invH, vyi = (y[i] - py2[i]) * invH;
-        if (contact[i] === 1) vxi *= fr;
-        else if (contact[i] === 2) vyi *= frWall;
+        const ci = contact[i];
+        if (ci === 1) vxi *= fr;
+        else if (ci === 2) vyi *= frWall;
+        else if (ci > 2) {
+          const sg = M.segs[ci - 3];
+          const vt = vxi * sg.tx + vyi * sg.ty;
+          const k = (sg.walk ? fr : frWall) - 1;
+          vxi += vt * k * sg.tx;
+          vyi += vt * k * sg.ty;
+        }
         vx[i] = vxi;
         vy[i] = vyi;
         if (y[i] < waterY) {
@@ -1223,7 +1606,7 @@
               this.events.push({ type: "splash", x: x[i], y: waterY, power: p < 0.15 ? 0.15 : p > 1 ? 1 : p, side: this.side[i] });
             }
           }
-          if (y[i] < CFG.killY) this._killNode(i);
+          if (y[i] < killY) this._killNode(i);
         }
       }
       const a = h / (CFG.stressTau + h);
@@ -1351,13 +1734,13 @@
         this._refreshAround(b.b);
       }
     }
-    _destroyCore(core) {
+    _destroyCore(core, cause = "fire") {
       if (!core.alive) return;
       core.alive = false;
       core.hp = 0;
       const i = core.node;
       const cx = this.x[i], cy = this.y[i];
-      this.events.push({ type: "coreDestroyed", side: core.side, x: cx, y: cy });
+      this.events.push({ type: "coreDestroyed", side: core.side, x: cx, y: cy, cause });
       this._blast(cx, cy, null, 220, 4.2, CFG.shell.impulse * 2.2, 5, null, null, this.R.blastOcclusion);
       this._refreshAround(i);
     }
@@ -1467,7 +1850,7 @@
         if (!c.alive) continue;
         this._poseCannon(c);
         if (c.recoil > 0) c.recoil = Math.max(0, c.recoil - dt * 2.4);
-        if (c.py < CFG.waterY) {
+        if (c.py < this.M.waterY) {
           this._killCannon(c, "sunk");
           continue;
         }
@@ -1529,7 +1912,7 @@
       this.events.push({ type: "fire", side: c.side, cannon: c.idx, x: c.px + dx * CANNON.barrelLen, y: c.py + dy * CANNON.barrelLen, angle: ang });
     }
     _stepShells(h) {
-      const S = CFG.shell, g = CFG.gravity, W = CFG.fieldW;
+      const S = CFG.shell, g = CFG.gravity, M = this.M, W = M.fieldW, waterY = M.waterY, gMax = M.gMax;
       const x = this.x, y = this.y;
       const beams = this.beams;
       let anyDead = false;
@@ -1543,12 +1926,12 @@
         s.x += s.vx * h;
         s.y += s.vy * h;
         s.age += h;
-        if (s.y < CFG.waterY) {
+        if (s.y < waterY) {
           s.alive = false;
-          this.events.push({ type: "splash", x: s.x, y: CFG.waterY, power: 0.75, shell: true, side: s.side, cannon: s.cannon });
+          this.events.push({ type: "splash", x: s.x, y: waterY, power: 0.75, shell: true, side: s.side, cannon: s.cannon });
           continue;
         }
-        if (s.y < 0 && (s.x < 0 || s.x > W)) {
+        if (s.y < gMax && s.y < M.groundIn(s.x)) {
           this._explode(s, null, null, null, "ground");
           continue;
         }
@@ -1680,19 +2063,24 @@
         b._smax = b.stress;
       }
       if (this.peace) return;
+      const waterY = this.M.waterY;
       for (const core of this.cores) {
         if (!core || !core.alive) continue;
-        if (this.y[core.node] < CFG.waterY - 0.4) {
+        if (this.y[core.node] < waterY - 0.4) {
           core.alive = false;
           core.sunk = true;
-          this.events.push({ type: "coreSunk", side: core.side, x: this.x[core.node], y: CFG.waterY });
+          this.events.push({ type: "coreSunk", side: core.side, x: this.x[core.node], y: waterY });
           this._refreshAround(core.node);
+        } else if (this.R.coreGroundKill && this.phase !== "ended" && core.touched) {
+          core.grounded = true;
+          this._destroyCore(core, "ground");
         }
       }
       if (this.phase === "ended") return;
       const p = this.cores[0], e = this.cores[1];
       if (!p.alive || !e.alive) {
-        const reason = !p.alive && p.sunk || !e.alive && e.sunk ? "coreSunk" : "coreDestroyed";
+        const dead = [p, e].filter((c) => !c.alive);
+        const reason = dead.some((c) => c.sunk) ? "coreSunk" : dead.some((c) => c.grounded) ? "coreGrounded" : "coreDestroyed";
         this._end(!p.alive && !e.alive ? "draw" : !p.alive ? "enemy" : "player", reason);
         return;
       }
@@ -1754,7 +2142,7 @@
   // src/sim/ballistics.js
   var DEG3 = Math.PI / 180;
   function predictShot(bpSelf, cannon, bpOther, opts = {}) {
-    const S = CFG.shell, W = CFG.fieldW, g = CFG.gravity;
+    const S = CFG.shell, M = bpSelf.map, W = M.fieldW, g = CFG.gravity;
     const pose = bpSelf.cannonPose(cannon);
     const angle = opts.angle ?? cannon.angle;
     const x0 = pose.px + Math.cos(angle) * CANNON.barrelLen;
@@ -1764,8 +2152,8 @@
     const STRIDE2 = 4;
     let x = x0, y = y0;
     const pts = [[x, y]];
-    const own = segsOf(bpSelf, false, cannon.beam);
-    const other = bpOther ? segsOf(bpOther, true, -1) : [];
+    const own = segsOf(bpSelf, false, cannon.beam, W);
+    const other = bpOther ? segsOf(bpOther, true, -1, W) : [];
     const ownCore = bpSelf.coreNode();
     const otherCore = bpOther ? bpOther.coreNode() : null;
     const otherCannons = bpOther ? [...bpOther.cannons.values()].map((c) => {
@@ -1786,8 +2174,8 @@
       t = n * h;
       x = x0 + vx * t;
       y = y0 + vy0 * t - 0.5 * g * t * t - 0.5 * g * h * t;
-      if (y < CFG.waterY) return done("water");
-      if (y < 0 && (x < 0 || x > W)) return done("ground");
+      if (y < M.waterY) return done("water");
+      if (y < M.gMax && y < M.groundIn(x)) return done("ground");
       if (x < -40 || x > W + 40) return done("far");
       if (ownCore && Math.hypot(x - ownCore.x, y - ownCore.y) < rCore) return done("own");
       if (otherCore && Math.hypot(x - (W - otherCore.x), y - otherCore.y) < rCore) return done("enemyCore");
@@ -1802,8 +2190,7 @@
     }
     return done("far");
   }
-  function segsOf(bp, mirror, mountBeamId) {
-    const W = CFG.fieldW;
+  function segsOf(bp, mirror, mountBeamId, W) {
     const out = [];
     for (const bm of bp.beams.values()) {
       const a = bp.nodes.get(bm.a), b = bp.nodes.get(bm.b);
@@ -1859,16 +2246,140 @@
     return high ? roots[roots.length - 1] : roots[0];
   }
 
-  // src/sim/forts.js
+  // src/sim/forts-maps.js
   var DEG4 = Math.PI / 180;
-  var FOE_CORE = [CFG.fieldW - CFG.corePos[0], CFG.corePos[1]];
-  function buildFort(spec, side) {
+  var SPECS = {
+    plain: {
+      garrison: {
+        core: [0, 2],
+        beams: [
+          [[-3, 0], [-3, 2], "steel"],
+          [[-3, 2], [-3, 4], "steel"],
+          [[-3, 4], [-3, 6], "steel"],
+          [[0, 0], [0, 2], "steel"],
+          [[0, 2], [0, 4], "steel"],
+          [[0, 4], [0, 6], "steel"],
+          [[3, 0], [3, 2], "steel"],
+          [[3, 2], [3, 4], "steel"],
+          [[3, 4], [3, 6], "steel"],
+          [[-3, 2], [0, 2], "steel"],
+          [[0, 2], [3, 2], "steel"],
+          [[-3, 4], [0, 4], "steel"],
+          [[0, 4], [3, 4], "steel"],
+          [[-3, 6], [0, 6], "steel"],
+          [[0, 6], [3, 6], "steel"],
+          [[-3, 0], [0, 2], "steel"],
+          [[0, 0], [3, 2], "steel"],
+          [[-3, 2], [0, 4], "steel"],
+          [[0, 2], [3, 4], "steel"],
+          [[-3, 4], [0, 6], "steel"],
+          [[0, 4], [3, 6], "steel"]
+        ],
+        cannons: [[[-3, 6], [0, 6], 63.915], [[0, 6], [3, 6], 67.114]]
+      },
+      starter: {
+        core: [2, 4],
+        beams: [
+          [[0, 0], [0, 2], "steel"],
+          [[0, 2], [0, 4], "steel"],
+          [[3, 0], [3, 2], "steel"],
+          [[3, 2], [3, 4], "steel"],
+          [[0, 2], [3, 2], "steel"],
+          [[0, 0], [3, 2], "wood"],
+          [[0, 2], [3, 4], "wood"],
+          [[0, 4], [2, 4], "steel"],
+          [[2, 4], [3, 4], "steel"],
+          [[0, 2], [2, 4], "wood"],
+          [[3, 2], [2, 4], "wood"],
+          [[0, 4], [0, 5], "wood"],
+          [[3, 4], [3, 5], "wood"],
+          [[0, 5], [3, 5], "steel"],
+          [[0, 4], [3, 5], "wood"]
+        ],
+        cannons: [[[0, 4], [2, 4], 65.744]]
+      }
+    },
+    ridge: {
+      garrison: {
+        core: [0, 2],
+        beams: [
+          [[-3, 0], [-3, 2], "steel"],
+          [[-3, 2], [-3, 4], "steel"],
+          [[-3, 4], [-3, 6], "steel"],
+          [[0, 0], [0, 2], "steel"],
+          [[0, 2], [0, 4], "steel"],
+          [[0, 4], [0, 6], "steel"],
+          [[3, 0], [3, 2], "steel"],
+          [[3, 2], [3, 4], "steel"],
+          [[3, 4], [3, 6], "steel"],
+          [[-3, 2], [0, 2], "steel"],
+          [[0, 2], [3, 2], "steel"],
+          [[-3, 4], [0, 4], "steel"],
+          [[0, 4], [3, 4], "steel"],
+          [[-3, 6], [0, 6], "steel"],
+          [[0, 6], [3, 6], "steel"],
+          [[-3, 0], [0, 2], "steel"],
+          [[0, 0], [3, 2], "steel"],
+          [[-3, 2], [0, 4], "steel"],
+          [[0, 2], [3, 4], "steel"],
+          [[-3, 4], [0, 6], "steel"],
+          [[0, 4], [3, 6], "steel"]
+        ],
+        cannons: [[[-3, 6], [0, 6], 60.241], [[0, 6], [3, 6], 63.915]]
+      },
+      starter: {
+        core: [1, 4],
+        beams: [
+          [[0, 0], [0, 2], "steel"],
+          [[0, 2], [0, 4], "steel"],
+          [[3, 0], [3, 2], "steel"],
+          [[3, 2], [3, 4], "steel"],
+          [[0, 2], [3, 2], "steel"],
+          [[0, 0], [3, 2], "wood"],
+          [[0, 2], [3, 4], "wood"],
+          [[0, 4], [1, 4], "steel"],
+          [[1, 4], [3, 4], "steel"],
+          [[0, 2], [1, 4], "wood"],
+          [[3, 2], [1, 4], "wood"],
+          [[0, 4], [0, 5], "wood"],
+          [[3, 4], [3, 5], "wood"],
+          [[0, 5], [3, 5], "steel"],
+          [[0, 4], [3, 5], "wood"]
+        ],
+        cannons: [[[1, 4], [3, 4], 63.44]]
+      }
+    }
+  };
+  function build(spec, side, map) {
+    const bp = new Blueprint(side, void 0, map);
+    const must = (r, what) => {
+      if (!r.ok) throw new Error(`\u9884\u8BBE\u5821\u5792 ${what}: ${r.reason}`);
+      return r;
+    };
+    must(bp.setCore(spec.core[0], spec.core[1]), "\u6838\u5FC3");
+    const node = ([x, y]) => must(bp.addNode(x, y), `\u8282\u70B9 (${x},${y})`).id;
+    for (const [a, b, mat2] of spec.beams) must(bp.addBeam(node(a), node(b), mat2), `\u6746\u4EF6 (${a})-(${b})`);
+    for (const [a, b, deg] of spec.cannons) must(bp.addCannon(bp.beamBetween(node(a), node(b)).id, deg * DEG4), `\u706B\u70AE (${a})-(${b})`);
+    return bp;
+  }
+  function hasMapPreset(mapId, kind) {
+    return !!(SPECS[mapId] && SPECS[mapId][kind]);
+  }
+  function mapPreset(mapId, kind, side = "player") {
+    return hasMapPreset(mapId, kind) ? build(SPECS[mapId][kind], side, getMap(mapId)) : null;
+  }
+
+  // src/sim/forts.js
+  var STRAIT = getMap("strait");
+  var FIELD_W = STRAIT.fieldW;
+  function buildFort(spec, side, map = STRAIT) {
+    const M = getMap(map);
     const plain = { ...spec, cannons: (spec.cannons || []).map(([a, b, aim]) => [a, b, typeof aim === "number" ? aim : 45]) };
-    const bp = Blueprint.build(plain, side);
+    const bp = Blueprint.build(plain, side, void 0, M);
     const cannons = [...bp.cannons.values()];
     (spec.cannons || []).forEach(([, , aim], i) => {
       if (typeof aim === "number") return;
-      const t = aim.at || [FOE_CORE[0] + (aim.dx || 0), FOE_CORE[1] + (aim.dy || 0)];
+      const t = aim.at || [M.foeCore[0] + (aim.dx || 0), M.foeCore[1] + (aim.dy || 0)];
       const pose = bp.cannonPose(cannons[i]);
       const ang = solveAngle(pose.px, pose.py, t[0], t[1], !!aim.high);
       if (ang == null) throw new Error(`\u706B\u70AE ${i}: \u6253\u4E0D\u5230\u76EE\u6807 (${t})`);
@@ -2086,19 +2597,27 @@
     cannons: [
       ["P1", "P2", { core: true, high: true }],
       // 对方塔顶炮的炮耳轴在对方本地 (3, 9.5)，镜像到己方本地是 (fieldW - 3, 9.5)
-      ["P2", "P3", { at: [CFG.fieldW - 3, 9.5], high: true }],
+      ["P2", "P3", { at: [FIELD_W - 3, 9.5], high: true }],
       // 对方甲板前端斜撑 U4-D6 的中点在对方本地 (5, -1)
-      ["U4", "D6", { at: [CFG.fieldW - 5, -1], high: false }]
+      ["U4", "D6", { at: [FIELD_W - 5, -1], high: false }]
     ]
   };
-  function makeEnemyFort() {
-    return buildFort(ENEMY_SPEC, "enemy");
+  function presetFort(map, kind, side = "player") {
+    const M = getMap(map);
+    if (M.raw === MAPS.strait) {
+      if (kind === "garrison") return buildFort(ENEMY_SPEC, side);
+      if (kind === "starter") return buildFort(STARTER_SPEC, side);
+      if (kind === "reference") return buildFort(REFERENCE_SPEC, side);
+      return null;
+    }
+    for (const id of Object.keys(MAPS)) if (M.raw === MAPS[id]) return mapPreset(id, kind, side);
+    return null;
   }
-  function makeStarterFort() {
-    return buildFort(STARTER_SPEC, "player");
-  }
-  function makeReferenceFort(side = "player") {
-    return buildFort(REFERENCE_SPEC, side);
+  function hasPreset(map, kind) {
+    const M = getMap(map);
+    if (M.raw === MAPS.strait) return kind === "garrison" || kind === "starter" || kind === "reference";
+    for (const id of Object.keys(MAPS)) if (M.raw === MAPS[id]) return hasMapPreset(id, kind);
+    return false;
   }
 
   // src/theme.js
@@ -2259,15 +2778,18 @@
       this.w = 1;
       this.h = 1;
       this.time = 0;
+      this.map = getMap();
       this._vig = null;
       this._vigKey = "";
     }
-    frame(view, dpr, w, h, time) {
+    /** map：当前地图（地形、水面、建造区都按它画） */
+    frame(view, dpr, w, h, time, map) {
       this.view = view;
       this.dpr = dpr;
       this.w = w;
       this.h = h;
       this.time = time;
+      if (map) this.map = map;
     }
     sx(x) {
       return this.view.sx(x);
@@ -2340,7 +2862,7 @@
       c.lineWidth = 1;
       c.stroke();
       if (v.ppm >= 11) {
-        const B = CFG.build;
+        const B = this.map.build;
         c.font = `10px ${MONO}`;
         c.fillStyle = BP.inkFaint;
         c.textBaseline = "bottom";
@@ -2354,52 +2876,71 @@
       }
     }
     // ---------- 地形剖面 ----------
+    /** 地表折线的屏幕坐标（两头伸出画面） */
+    _groundPts(align) {
+      const v = this.view, w = this.w, h = this.h;
+      const out = [];
+      for (const [x, y] of this.map.worldGround) {
+        let sx = v.sx(x), sy = v.sy(y);
+        sx = sx < -40 ? -40 : sx > w + 40 ? w + 40 : sx;
+        sy = sy < -4 * h ? -4 * h : sy > 5 * h ? 5 * h : sy;
+        out.push(align ? [this.al(sx, 2), this.al(sy, 2)] : [sx, sy]);
+      }
+      return out;
+    }
     _terrainPath() {
-      const c = this.ctx, v = this.view, W = CFG.fieldW, BIG = 400;
+      const c = this.ctx, h = this.h;
+      const pts = this._groundPts(false);
       c.beginPath();
-      c.moveTo(v.sx(-BIG), v.sy(0));
-      c.lineTo(v.sx(0), v.sy(0));
-      c.lineTo(v.sx(0), v.sy(CFG.seabedY));
-      c.lineTo(v.sx(W), v.sy(CFG.seabedY));
-      c.lineTo(v.sx(W), v.sy(0));
-      c.lineTo(v.sx(W + BIG), v.sy(0));
-      c.lineTo(v.sx(W + BIG), v.sy(-BIG));
-      c.lineTo(v.sx(-BIG), v.sy(-BIG));
+      pts.forEach(([x, y], i) => {
+        if (i === 0) c.moveTo(x, y);
+        else c.lineTo(x, y);
+      });
+      c.lineTo(pts[pts.length - 1][0], 6 * h);
+      c.lineTo(pts[0][0], 6 * h);
       c.closePath();
     }
     water() {
-      const c = this.ctx, v = this.view, W = CFG.fieldW, t = this.time;
-      const xa = v.sx(0), xb = v.sx(W);
-      const yb = v.sy(CFG.seabedY);
-      const n = Math.max(8, Math.ceil((xb - xa) / 10));
-      const wave = (x) => CFG.waterY + 0.07 * Math.sin(x * 1.25 + t * 1.6) + 0.045 * Math.sin(x * 2.9 - t * 1.15);
-      c.beginPath();
-      for (let i = 0; i <= n; i++) {
-        const x = W * i / n;
-        const px2 = v.sx(x), py2 = v.sy(wave(x));
-        if (i === 0) c.moveTo(px2, py2);
-        else c.lineTo(px2, py2);
+      const M = this.map;
+      if (!M.hasWater) return;
+      const c = this.ctx, v = this.view, t = this.time, h = this.h;
+      const wave = (x) => M.waterY + 0.07 * Math.sin(x * 1.25 + t * 1.6) + 0.045 * Math.sin(x * 2.9 - t * 1.15);
+      let widest = null;
+      for (const [x0, x1] of M.waterSpans) {
+        const a = Math.max(x0, v.wx(-20)), b = Math.min(x1, v.wx(this.w + 20));
+        if (b <= a) continue;
+        if (!widest || x1 - x0 > widest[1] - widest[0]) widest = [x0, x1];
+        const n = Math.max(8, Math.ceil((v.sx(b) - v.sx(a)) / 10));
+        const line = () => {
+          for (let i = 0; i <= n; i++) {
+            const x = a + (b - a) * i / n;
+            const px2 = v.sx(x), py2 = v.sy(wave(x));
+            if (i === 0) c.moveTo(px2, py2);
+            else c.lineTo(px2, py2);
+          }
+        };
+        c.beginPath();
+        line();
+        const bed = M.worldGround.filter(([x]) => x >= a - 1e-6 && x <= b + 1e-6);
+        c.lineTo(v.sx(b), v.sy(Math.min(M.waterY, M.groundIn(b))));
+        for (let i = bed.length - 1; i >= 0; i--) c.lineTo(v.sx(bed[i][0]), Math.min(h + 10, v.sy(Math.min(M.waterY, bed[i][1]))));
+        c.lineTo(v.sx(a), v.sy(Math.min(M.waterY, M.groundIn(a))));
+        c.closePath();
+        c.fillStyle = BP.water;
+        c.fill();
+        c.beginPath();
+        line();
+        c.strokeStyle = BP.waterLine;
+        c.lineWidth = 1.5;
+        c.lineJoin = "round";
+        c.stroke();
       }
-      c.lineTo(xb, yb);
-      c.lineTo(xa, yb);
-      c.closePath();
-      c.fillStyle = BP.water;
-      c.fill();
-      c.beginPath();
-      for (let i = 0; i <= n; i++) {
-        const x = W * i / n;
-        const px2 = v.sx(x), py2 = v.sy(wave(x));
-        if (i === 0) c.moveTo(px2, py2);
-        else c.lineTo(px2, py2);
-      }
-      c.strokeStyle = BP.waterLine;
-      c.lineWidth = 1.5;
-      c.lineJoin = "round";
-      c.stroke();
-      const cx = v.sx(W * 0.5), y0 = v.sy(CFG.waterY);
+      if (!widest) return;
+      const cx = v.sx((widest[0] + widest[1]) / 2), y0 = v.sy(M.waterY);
+      const k0 = Math.min(1.4, v.ppm / 24, (v.sx(widest[1]) - v.sx(widest[0])) / 60);
       c.beginPath();
       for (let k = 0; k < 3; k++) {
-        const half = (22 - k * 7) * Math.min(1.4, v.ppm / 24);
+        const half = (22 - k * 7) * k0;
         const yy = this.al(y0 + (k + 1) * 5 * Math.min(1.4, v.ppm / 24));
         c.moveTo(cx - half, yy);
         c.lineTo(cx + half, yy);
@@ -2429,33 +2970,39 @@
       c.lineWidth = 1;
       c.stroke();
       c.restore();
-      const W = CFG.fieldW;
       c.beginPath();
-      c.moveTo(-10, this.al(v.sy(0), 2));
-      c.lineTo(this.al(v.sx(0), 2), this.al(v.sy(0), 2));
-      c.lineTo(this.al(v.sx(0), 2), v.sy(CFG.seabedY));
-      c.lineTo(this.al(v.sx(W), 2), v.sy(CFG.seabedY));
-      c.lineTo(this.al(v.sx(W), 2), this.al(v.sy(0), 2));
-      c.lineTo(w + 10, this.al(v.sy(0), 2));
+      this._groundPts(true).forEach(([x, y], i) => {
+        if (i === 0) c.moveTo(x, y);
+        else c.lineTo(x, y);
+      });
       c.strokeStyle = BP.ink;
       c.lineWidth = 2;
       c.lineJoin = "miter";
       c.stroke();
     }
     // ---------- 建造区 ----------
-    zone(mirror, alpha, label) {
-      const c = this.ctx, v = this.view, B = CFG.build, W = CFG.fieldW;
+    /** 建造区的轮廓：矩形里露在地面以上的那部分（屏幕坐标的点列） */
+    _zonePts(mirror) {
+      const M = this.map, v = this.view, B = M.build, W = M.fieldW;
       const X = (x) => v.sx(mirror ? W - x : x);
-      const pts = [
-        [X(B.xMin), v.sy(0)],
-        [X(B.xMin), v.sy(B.yMax)],
-        [X(B.xMax), v.sy(B.yMax)],
-        [X(B.xMax), v.sy(B.yMin)],
-        [X(0), v.sy(B.yMin)],
-        [X(0), v.sy(0)]
-      ].map(([x, y]) => [this.al(x), this.al(y)]);
+      const floor = (x) => Math.max(B.yMin, Math.min(B.yMax, M.groundTop(x)));
+      const xs = [B.xMin];
+      for (const [x] of M.localGround) if (x > B.xMin + 1e-6 && x < B.xMax - 1e-6 && x > xs[xs.length - 1] + 1e-6) xs.push(x);
+      xs.push(B.xMax);
+      const pts = [[X(B.xMin), v.sy(B.yMax)], [X(B.xMax), v.sy(B.yMax)]];
+      for (let i = xs.length - 1; i >= 0; i--) {
+        const x = xs[i];
+        const lo = Math.max(B.yMin, Math.min(B.yMax, M.groundIn(x))), hi = floor(x);
+        pts.push([X(x), v.sy(lo)]);
+        if (hi - lo > 1e-6) pts.push([X(x), v.sy(hi)]);
+      }
+      return pts.map(([x, y]) => [this.al(x), this.al(y)]);
+    }
+    zone(mirror, alpha, label) {
+      const c = this.ctx, v = this.view, B = this.map.build, W = this.map.fieldW;
+      const X = (x) => v.sx(mirror ? W - x : x);
       c.beginPath();
-      roundPoly(c, pts, 7);
+      roundPoly(c, this._zonePts(mirror), 7);
       c.globalAlpha = alpha;
       c.setLineDash([7, 5]);
       c.lineDashOffset = 0;
@@ -2469,6 +3016,33 @@
         c.textAlign = "left";
         c.textBaseline = "top";
         c.fillText(label, X(B.xMin) + 8, v.sy(B.yMax) + 7);
+      }
+      c.globalAlpha = 1;
+    }
+    /** 核心可以放的范围：一圈点线，拖动核心时才亮起来 */
+    coreZone(mirror, alpha, color, label) {
+      const c = this.ctx, v = this.view, Z = this.map.coreZone, W = this.map.fieldW;
+      if (!Z || alpha <= 0) return;
+      const xa = v.sx(mirror ? W - Z.xMax : Z.xMin), xb = v.sx(mirror ? W - Z.xMin : Z.xMax);
+      const ya = v.sy(Z.yMax), yb = v.sy(Z.yMin);
+      const pad = Math.min(14, 0.5 * v.ppm);
+      c.globalAlpha = alpha;
+      c.beginPath();
+      roundRect(c, this.al(xa - pad), this.al(ya - pad), xb - xa + pad * 2, yb - ya + pad * 2, 8);
+      c.setLineDash([2, 5]);
+      c.lineDashOffset = 0;
+      c.lineCap = "round";
+      c.strokeStyle = color;
+      c.lineWidth = 1.5;
+      c.stroke();
+      c.setLineDash([]);
+      c.lineCap = "butt";
+      if (label) {
+        c.font = `600 11px ${FONT}`;
+        c.fillStyle = color;
+        c.textAlign = "right";
+        c.textBaseline = "bottom";
+        c.fillText(label, xb + pad - 6, ya - pad - 4);
       }
       c.globalAlpha = 1;
     }
@@ -2947,6 +3521,8 @@
       this.hover = null;
       this.report = null;
       this._reportT0 = 0;
+      this.hideEnemy = false;
+      this.labels = { me: "", foe: "\u654C\u65B9\u5821\u5792" };
       this.pops = /* @__PURE__ */ new Map();
       this.dying = [];
       this.floats = [];
@@ -3000,20 +3576,20 @@
     }
     clearAll() {
       this.cancel();
-      const snap = this.player.toJSON();
+      const snap2 = this.player.toJSON();
       const before = this.player.cost();
       this._captureDying(() => this.player.reset());
-      if (JSON.stringify(this.player.toJSON()) === JSON.stringify(snap)) return;
-      this._commit(snap, before);
+      if (JSON.stringify(this.player.toJSON()) === JSON.stringify(snap2)) return;
+      this._commit(snap2, before);
       this.audio.ui("delete");
     }
     loadBlueprint(bp) {
       this.cancel();
-      const snap = this.player.toJSON();
+      const snap2 = this.player.toJSON();
       const before = this.player.cost();
       this.player.load(bp);
-      if (JSON.stringify(this.player.toJSON()) === JSON.stringify(snap)) return;
-      this._commit(snap, before);
+      if (JSON.stringify(this.player.toJSON()) === JSON.stringify(snap2)) return;
+      this._commit(snap2, before);
       const t = this.time;
       for (const id of this.player.beams.keys()) this.pops.set("b" + id, t);
       this.audio.ui("place");
@@ -3022,6 +3598,27 @@
     invalidate() {
       this._bump();
       this._repCache = null;
+    }
+    /**
+     * 换一对蓝图来编辑（换地图、换边时用）：player 是正在编辑的那座，enemy 是画在对面的那座。
+     * 撤销记录属于被换下的那座蓝图，一并清空。
+     */
+    setForts(player, enemy) {
+      this.cancel();
+      this.player = player;
+      this.enemy = enemy;
+      this.undoStack.length = 0;
+      this.redoStack.length = 0;
+      this.pops.clear();
+      this.dying.length = 0;
+      this.floats.length = 0;
+      this.hover = null;
+      this.report = null;
+      this._traj.clear();
+      this.invalidate();
+    }
+    get map() {
+      return this.player.map;
     }
     setEnabled(on) {
       on = !!on;
@@ -3100,10 +3697,10 @@
       if (!this.pointer.inside) return;
       this.chain = null;
       const { x, y } = this._world();
-      const snap = this.player.toJSON();
+      const snap2 = this.player.toJSON();
       const before = this.player.cost();
       const r = this._deleteAt(x, y, false);
-      if (r.ok) this._commit(snap, before);
+      if (r.ok) this._commit(snap2, before);
       else if (r.reason) this._reject(r.reason, x, y);
     }
     resize(w, h, dpr) {
@@ -3122,8 +3719,8 @@
     _bump() {
       this.rev++;
     }
-    _pushUndo(snap) {
-      this.undoStack.push(snap);
+    _pushUndo(snap2) {
+      this.undoStack.push(snap2);
       if (this.undoStack.length > UNDO_CAP) this.undoStack.shift();
       this.redoStack.length = 0;
     }
@@ -3131,8 +3728,8 @@
       this.onChange({ delta: this.player.cost() - costBefore });
     }
     /** 一次已经完成的修改：入撤销栈、bump、通知 */
-    _commit(snap, costBefore) {
-      this._pushUndo(snap);
+    _commit(snap2, costBefore) {
+      this._pushUndo(snap2);
       this._bump();
       this._changed(costBefore);
     }
@@ -3306,7 +3903,7 @@
     }
     _placeMember(from, t) {
       const bp = this.player;
-      const snap = bp.toJSON();
+      const snap2 = bp.toJSON();
       const before = bp.cost();
       let to = t.node, created = false;
       if (!to) {
@@ -3317,12 +3914,12 @@
       }
       const r2 = bp.addBeam(from, to, t.mat);
       if (!r2.ok) {
-        if (created) bp.load(snap);
+        if (created) bp.load(snap2);
         return r2;
       }
       this.pops.set("b" + r2.id, this.time);
       if (created) this.pops.set("n" + to, this.time);
-      this._commit(snap, before);
+      this._commit(snap2, before);
       this.audio.ui("place");
       return { ok: true, to };
     }
@@ -3479,7 +4076,7 @@
       if (tool === "cannon") {
         const b = this.pickBeam(x, y);
         if (!b) return;
-        const snap = this.player.toJSON();
+        const snap2 = this.player.toJSON();
         const before = this.player.cost();
         const r = this.player.addCannon(b.id, 45 * DEG5);
         if (!r.ok) {
@@ -3487,14 +4084,14 @@
           return;
         }
         this.pops.set("c" + r.id, this.time);
-        this._commit(snap, before);
+        this._commit(snap2, before);
         this.audio.ui("cannon");
         return;
       }
       if (tool === "move") {
         const n = this.pickNode(x, y);
         if (n) {
-          if (n.kind !== "free") {
+          if (n.kind === "anchor" || n.kind === "core" && !this.player.rules.coreZone) {
             this._reject(n.kind === "core" ? "\u6838\u5FC3\u4E0D\u80FD\u79FB\u52A8" : "\u951A\u70B9\u4E0D\u80FD\u79FB\u52A8", x, y);
             return;
           }
@@ -3645,10 +4242,10 @@
       switch (d.kind) {
         case "right":
           if (!d.panning && d.hit) {
-            const snap = this.player.toJSON();
+            const snap2 = this.player.toJSON();
             const before = this.player.cost();
             const r = this._deleteItem(d.hit, x, y);
-            if (r.ok) this._commit(snap, before);
+            if (r.ok) this._commit(snap2, before);
             else if (r.reason) this._reject(r.reason, x, y);
           }
           break;
@@ -3727,7 +4324,7 @@
     }
     _replaceMat(b, x, y) {
       const bp = this.player;
-      const snap = bp.toJSON();
+      const snap2 = bp.toJSON();
       const before = bp.cost();
       const r = bp.setBeamMat(b.id, this._tool);
       if (!r.ok) {
@@ -3738,7 +4335,7 @@
       const delta = bp.cost() - before;
       this.pops.set("f" + b.id, this.time);
       this._float(signed(delta), x, y, delta > 0 ? BP2.highlight : BP2.valid);
-      this._commit(snap, before);
+      this._commit(snap2, before);
       this.audio.ui("place");
     }
     _trackSnap(from) {
@@ -3861,7 +4458,7 @@
       } else if (h.type === "node") {
         const n = bp.nodes.get(h.id);
         if (n) {
-          if (n.kind === "core") info = { text: "\u6838\u5FC3 \xB7 \u9700\u8981\u7ED3\u6784\u6258\u4F4F", color: BP2.player };
+          if (n.kind === "core") info = { text: bp.rules.coreZone ? tool === "move" ? "\u6838\u5FC3 \xB7 \u62D6\u5230\u8303\u56F4\u91CC\u7684\u4EFB\u610F\u4F4D\u7F6E" : "\u6838\u5FC3 \xB7 \u9700\u8981\u7ED3\u6784\u6258\u4F4F\uFF08\u7528\u300C\u79FB\u52A8\u300D\u53EF\u4EE5\u632A\uFF09" : "\u6838\u5FC3 \xB7 \u9700\u8981\u7ED3\u6784\u6258\u4F4F", color: BP2.player };
           else if (n.kind === "anchor") info = { text: tool === "move" ? "\u951A\u70B9\u4E0D\u80FD\u79FB\u52A8" : "\u951A\u70B9", color: tool === "move" ? BP2.invalid : BP2.anchor };
           else info = { text: `\u8282\u70B9 \xB7 ${bp.beamsOf(n.id).length} \u6839\u6746\u4EF6`, color: BP2.highlight };
         }
@@ -3897,7 +4494,7 @@
       if (e && e.rev === this.rev && e.angle === c.angle) return e.res;
       let res = null;
       try {
-        res = predictShot(this.player, c, this.enemy);
+        res = predictShot(this.player, c, this.hideEnemy ? null : this.enemy);
       } catch {
         res = null;
       }
@@ -3915,7 +4512,7 @@
       const p = this.p, v = this.view;
       const t = this.time;
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-      p.frame(v, this.dpr, this.w, this.h, t);
+      p.frame(v, this.dpr, this.w, this.h, t, this.player.map);
       this._computeHover();
       p.paper();
       p.grid();
@@ -3923,7 +4520,15 @@
       p.terrain();
       p.zone(false, 1, "\u5EFA\u9020\u533A");
       p.zone(true, 0.4, null);
-      this._drawEnemy();
+      if (this.player.rules.coreZone) {
+        const d = this.drag;
+        const dragging = d && d.kind === "move" && this.player.nodes.get(d.node)?.kind === "core";
+        const hot = dragging || this._tool === "move" && this.enabled;
+        p.coreZone(false, hot ? 0.95 : 0.3, BP2.player, hot ? "\u6838\u5FC3\u8303\u56F4" : null);
+        if (this.hideEnemy) p.coreZone(true, 0.5, BP2.enemy, null);
+      }
+      if (this.hideEnemy) this._drawHiddenEnemy();
+      else this._drawEnemy();
       const active = this._activeCannon();
       for (const c of this.player.cannons.values()) {
         if (c.id === active) continue;
@@ -3974,8 +4579,18 @@
       const k = (this.time - t0) / FLASH_T;
       return k >= 1 || k < 0 ? 0 : 1 - k;
     }
+    /** 对方的堡垒被遮住时：只画对面的锚点和一句说明 */
+    _drawHiddenEnemy() {
+      const p = this.p, v = this.view, M = this.map, W = M.fieldW;
+      const r = this._nodeR();
+      for (const [x, y] of M.anchors) p.anchor(v.sx(W - x), v.sy(y), Math.max(7, r * 2.2), BP2.enemy, M.surfaceKind(x, y) === "wall" ? "right" : "down", 0.5);
+      const Z = M.coreZone || M.build;
+      const cx = v.sx(W - (Z.xMin + Z.xMax) / 2), cy = v.sy(Z.yMax) - Math.min(14, 0.5 * v.ppm) - 22;
+      p.label(cx, cy, this.labels.foe, BP2.enemy, 12, "center", "bottom", 0.9, 700);
+      p.label(cx, cy + 2, "\u5F00\u6218\u524D\u770B\u4E0D\u5230 \xB7 \u6838\u5FC3\u5728\u865A\u7EBF\u6846\u91CC", BP2.enemyDim, 11, "center", "top", 1, 600);
+    }
     _drawEnemy() {
-      const p = this.p, v = this.view, bp = this.enemy, W = CFG.fieldW;
+      const p = this.p, v = this.view, bp = this.enemy, M = this.map, W = M.fieldW;
       if (!bp) return;
       const A = 0.62;
       const X = (x) => v.sx(W - x);
@@ -3991,7 +4606,7 @@
       const r = this._nodeR();
       for (const n of bp.nodes.values()) {
         const sx = X(n.x), sy = v.sy(n.y);
-        if (n.kind === "anchor") p.anchor(sx, sy, Math.max(7, r * 2.2), BP2.enemy, n.y < -1e-6 ? "right" : "down", A);
+        if (n.kind === "anchor") p.anchor(sx, sy, Math.max(7, r * 2.2), BP2.enemy, M.surfaceKind(n.x, n.y) === "wall" ? "right" : "down", A);
         else if (n.kind === "free") p.node(sx, sy, r, BP2.enemy, BP2.paper, A);
         maxY = Math.max(maxY, n.y);
         minX = Math.min(minX, W - n.x);
@@ -4001,12 +4616,12 @@
       if (core) p.core(X(core.x), v.sy(core.y), BP2.enemy, v.ppm, "\u6838\u5FC3", 0.85);
       if (maxY > -Infinity) {
         const cx = v.sx((minX + maxX) / 2), cy = v.sy(maxY) - 22;
-        p.label(cx, cy, "\u654C\u65B9\u5821\u5792", BP2.enemy, 12, "center", "bottom", 0.9, 700);
+        p.label(cx, cy, this.labels.foe, BP2.enemy, 12, "center", "bottom", 0.9, 700);
         p.label(cx, cy + 2, money(bp.cost()), BP2.enemyDim, 11, "center", "top", 1, 600);
       }
     }
     _mirrorPose(q) {
-      const W = CFG.fieldW;
+      const W = this.map.fieldW;
       return { px: W - q.px, py: q.py, mx: W - q.mx, my: q.my, angle: Math.PI - q.angle, beamAngle: Math.PI - q.beamAngle };
     }
     _beamScreen(b, bp = this.player) {
@@ -4045,7 +4660,7 @@
       const r = this._nodeR();
       for (const n of bp.nodes.values()) {
         const sx = v.sx(n.x), sy = v.sy(n.y);
-        if (n.kind === "anchor") p.anchor(sx, sy, Math.max(7, r * 2.2), BP2.anchor, n.y < -1e-6 ? "left" : "down");
+        if (n.kind === "anchor") p.anchor(sx, sy, Math.max(7, r * 2.2), BP2.anchor, bp.map.surfaceKind(n.x, n.y) === "wall" ? "left" : "down");
         else if (n.kind === "free") {
           const s = this._popScale("n" + n.id);
           p.node(sx, sy, r * s, BP2.ink);
@@ -4053,6 +4668,10 @@
       }
       const core = bp.coreNode();
       if (core) p.core(v.sx(core.x), v.sy(core.y), BP2.player, v.ppm, "\u6838\u5FC3", 1);
+      if (this.labels.me) {
+        const B = bp.map.build;
+        p.label(v.sx(B.xMin) + 8, v.sy(B.yMax) + 24, this.labels.me, BP2.player, 12, "left", "top", 0.95, 700);
+      }
     }
     // ---------- 战报 ----------
     _drawReportUnder() {
@@ -4240,7 +4859,7 @@
       if (t.valid) {
         text = `+${money(t.price)} \xB7 ${t.len.toFixed(1)} m`;
         chipCol = BP2.highlight;
-        if (bp.cost() + t.price > CFG.budget) {
+        if (bp.cost() + t.price > bp.map.budget) {
           text += " \xB7 \u8D85\u9884\u7B97";
           chipCol = BP2.invalid;
         }
@@ -4308,6 +4927,776 @@
         const a = k < 0.45 ? 1 : 1 - (k - 0.45) / 0.55;
         p.chip(v.sx(f.x), v.sy(f.y) - 18 - rise, f.text, f.color, { align: "center", alpha: a });
       }
+    }
+  };
+
+  // src/ui/icons.js
+  var svg = (body, cls = "ic", vb = "0 0 24 24") => `<svg class="${cls}" viewBox="${vb}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+  var ICON = {
+    play: svg('<path d="M8 5.6v12.8a.6.6 0 0 0 .9.5l10.2-6.4a.6.6 0 0 0 0-1L8.9 5.1a.6.6 0 0 0-.9.5z" fill="currentColor"/>'),
+    pause: svg('<path d="M9 6v12M15 6v12" stroke-width="2.4"/>'),
+    undo: svg('<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'),
+    redo: svg('<path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>'),
+    trash: svg('<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/>'),
+    truss: svg('<path d="M3 19h18"/><path d="M4 19l4.5-9 4.5 9 4.5-9L21 19"/><path d="M8.5 10h9"/>'),
+    move: svg('<path d="M12 3v18M3 12h18"/><path d="M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/>'),
+    erase: svg('<path d="M14 4.5l5.5 5.5-8.5 8.5H6.5l-3-3a1.4 1.4 0 0 1 0-2z"/><path d="M9 9.5l5.5 5.5"/><path d="M12 18.5h8"/>'),
+    cannon: svg('<path d="M6.5 12.2l11.3-6.6 1.8 3.1-10.6 7.4"/><circle cx="9" cy="16" r="3.4"/><path d="M3 20.5h12"/>'),
+    sound: svg('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>'),
+    mute: svg('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>'),
+    help: svg('<circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.1-2.4 3.6"/><path d="M12 17.2v.1" stroke-width="2.4"/>'),
+    back: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
+    replay: svg('<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4v4.5H9"/>'),
+    close: svg('<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>'),
+    arena: svg('<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 5.5H5a3 3 0 0 0 3.2 3.9M16 5.5h3a3 3 0 0 1-3.2 3.9"/><path d="M12 13v4M8.5 20h7M9.5 17h5"/>'),
+    chev: svg('<path d="M9 6l6 6-6 6"/>'),
+    map: svg('<path d="M3 17.5l4.5-6 3.5 3.5 4-7 6 9.5"/><path d="M3 20.5h18"/>'),
+    versus: svg('<circle cx="7.5" cy="8.5" r="3"/><circle cx="16.5" cy="8.5" r="3"/><path d="M2.5 19.5a5 5 0 0 1 10 0M11.5 19.5a5 5 0 0 1 10 0"/>'),
+    plus: svg('<path d="M12 5v14M5 12h14"/>'),
+    edit: svg('<path d="M4 20h4l10.5-10.5-4-4L4 16z"/><path d="M13 7l4 4"/>'),
+    copy: svg('<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/>'),
+    download: svg('<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M5 19.5h14"/>'),
+    upload: svg('<path d="M12 15V4M7.5 8.5L12 4l4.5 4.5"/><path d="M5 19.5h14"/>'),
+    check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+    field: svg('<path d="M3 18h6l1.5-4h3L15 18h6"/><path d="M3 18V8M21 18V8"/>')
+  };
+  var SWATCH = {
+    wood: svg('<path d="M3 6h24" stroke-width="4"/>', "sw", "0 0 30 12"),
+    steel: svg('<path d="M3 3.8h24M3 8.2h24" stroke-width="1.6"/>', "sw", "0 0 30 12"),
+    rope: svg('<path d="M3 6h24" stroke-width="1.3" stroke-dasharray="3 2.6"/>', "sw", "0 0 30 12"),
+    spring: svg('<path d="M2 6h4l2-3.6 3 7.2 3-7.2 3 7.2 3-7.2 2 3.6h6" stroke-width="1.6"/>', "sw", "0 0 30 12"),
+    cannon: svg('<path d="M9 7.4l13-5 1.3 2.8-12.4 5.6"/><circle cx="10.5" cy="8.4" r="2.6"/>', "sw", "0 0 30 12"),
+    assembly: svg('<path d="M3 6h7M20 6h7" stroke-width="2.6"/><circle cx="15" cy="6" r="3.2"/>', "sw", "0 0 30 12")
+  };
+
+  // src/editor/mapedit.js
+  var BP3 = THEME.bp;
+  var FAR_X = -60;
+  function el(tag, cls, parent, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  var clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  var snap = (v) => Math.round(v);
+  function blankMap(name = "\u65B0\u5730\u56FE") {
+    return {
+      id: "",
+      name,
+      fieldW: 32,
+      ground: [[FAR_X, 0], [0, 0]],
+      water: null,
+      build: { xMin: -8, xMax: 8, yMin: 0, yMax: 12 },
+      anchors: [[-6, 0], [-3, 0], [0, 0], [3, 0], [6, 0]],
+      coreZone: { xMin: -4, xMax: 6, yMin: 2, yMax: 8 },
+      core: [2, 4],
+      budget: 2e4,
+      maxCannons: 3
+    };
+  }
+  var MapEditor = class {
+    /**
+     * @param {{ canvas: HTMLCanvasElement, view: object, root: HTMLElement, onSave: (raw: object) => void, onCancel: () => void, toast: (text: string, kind?: string) => void }} o
+     */
+    constructor({ canvas, view, root, onSave, onCancel, toast }) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext("2d");
+      this.view = view;
+      this.p = new Painter(this.ctx);
+      this.onSave = onSave;
+      this.onCancel = onCancel;
+      this.toast = toast || (() => {
+      });
+      this.active = false;
+      this.tool = "ground";
+      this.draft = null;
+      this.pts = [];
+      this.M = null;
+      this.why = null;
+      this.drag = null;
+      this.hover = null;
+      this.pointer = { sx: -1e4, sy: -1e4 };
+      this.w = 1280;
+      this.h = 720;
+      this.dpr = 1;
+      this.time = 0;
+      this._buildPanel(root);
+      this._bind();
+    }
+    // ------------------------------------------------------------ 面板
+    _buildPanel(root) {
+      const P = el("div", "panel mapedit pe", root);
+      this.panel = P;
+      el("div", "me-title", P, "\u5730\u56FE\u7F16\u8F91");
+      const field = (label, input) => {
+        const r = el("label", "me-field", P);
+        el("span", "me-k", r, label);
+        r.appendChild(input);
+        return input;
+      };
+      const num = (min, max, step = 1) => {
+        const i = el("input", "me-in");
+        i.type = "number";
+        i.min = min;
+        i.max = max;
+        i.step = step;
+        return i;
+      };
+      this.inName = field("\u540D\u79F0", Object.assign(el("input", "me-in"), { type: "text", maxLength: 16 }));
+      this.inW = field("\u573A\u5730\u5BBD\u5EA6\uFF08\u7C73\uFF09", num(16, 60, 2));
+      const wr = el("div", "me-field", P);
+      const wl = el("label", "me-check", wr);
+      this.inWater = el("input", "", wl);
+      this.inWater.type = "checkbox";
+      el("span", "", wl, "\u6709\u6C34\uFF0C\u6C34\u9762\u9AD8\u5EA6");
+      this.inWaterY = num(-40, 40, 0.5);
+      wr.appendChild(this.inWaterY);
+      this.inBudget = field("\u9884\u7B97", num(1e3, 2e5, 1e3));
+      this.inCannons = field("\u706B\u70AE\u4E0A\u9650", num(1, 8));
+      el("div", "me-k me-gap", P, "\u5DE5\u5177");
+      const seg = el("div", "me-tools", P);
+      this.toolBtns = {};
+      for (const [id, name] of [["ground", "\u5730\u5F62"], ["anchor", "\u951A\u70B9"], ["zone", "\u8303\u56F4"]]) {
+        const b = el("button", "btn me-tool", seg, name);
+        b.type = "button";
+        b.tabIndex = -1;
+        b.addEventListener("click", () => this.setTool(id));
+        this.toolBtns[id] = b;
+      }
+      this.tip = el("div", "me-tip", P, "");
+      this.status = el("div", "me-status", P, "");
+      const row = el("div", "me-btns", P);
+      const cancel = el("button", "btn me-cancel", row, "\u53D6\u6D88");
+      cancel.type = "button";
+      cancel.tabIndex = -1;
+      cancel.addEventListener("click", () => this.onCancel());
+      this.saveBtn = el("button", "btn me-save", row);
+      this.saveBtn.type = "button";
+      this.saveBtn.tabIndex = -1;
+      this.saveBtn.insertAdjacentHTML("beforeend", ICON.check);
+      el("span", "", this.saveBtn, "\u4FDD\u5B58\u5E76\u4F7F\u7528");
+      this.saveBtn.addEventListener("click", () => {
+        if (!this.why) this.onSave(this._export());
+      });
+      const upd = () => this._readPanel();
+      for (const i of [this.inName, this.inW, this.inWater, this.inWaterY, this.inBudget, this.inCannons]) {
+        i.addEventListener("input", upd);
+        i.addEventListener("change", upd);
+      }
+    }
+    _readPanel() {
+      const d = this.draft;
+      if (!d) return;
+      d.name = this.inName.value.trim() || "\u81EA\u5B9A\u4E49\u5730\u56FE";
+      const w = Number(this.inW.value);
+      if (Number.isFinite(w) && w >= 16 && w <= 60 && Math.round(w) !== d.fieldW) {
+        d.fieldW = Math.round(w);
+        for (const p of this.pts) p[0] = Math.min(p[0], Math.floor(d.fieldW / 2));
+        this._refit = true;
+      }
+      this.inWaterY.disabled = !this.inWater.checked;
+      const wy = Number(this.inWaterY.value);
+      d.water = this.inWater.checked && Number.isFinite(wy) ? wy : null;
+      const b = Number(this.inBudget.value);
+      if (Number.isFinite(b)) d.budget = Math.round(b);
+      const c = Number(this.inCannons.value);
+      if (Number.isFinite(c)) d.maxCannons = Math.round(c);
+      this._changed();
+    }
+    _fillPanel() {
+      const d = this.draft;
+      this.inName.value = d.name || "";
+      this.inW.value = d.fieldW;
+      this.inWater.checked = d.water != null;
+      this.inWaterY.value = d.water != null ? d.water : -6;
+      this.inWaterY.disabled = d.water == null;
+      this.inBudget.value = d.budget;
+      this.inCannons.value = d.maxCannons;
+    }
+    setTool(t) {
+      this.tool = t;
+      for (const id in this.toolBtns) this.toolBtns[id].classList.toggle("sel", id === t);
+      this.tip.textContent = t === "ground" ? "\u62D6\u52A8\u5730\u8868\u4E0A\u7684\u70B9\uFF1B\u53CC\u51FB\u5730\u8868\u52A0\u4E00\u4E2A\u70B9\uFF1B\u53F3\u952E\u70B9\u4E00\u4E2A\u70B9\u5220\u6389\u5B83\u3002\u4E24\u4E2A\u70B9\u4E0A\u4E0B\u5BF9\u9F50\u5C31\u662F\u4E00\u9053\u5D16\u58C1\u3002" : t === "anchor" ? "\u70B9\u5730\u8868\u4E0A\u7684\u7F51\u683C\u70B9\u653E\u4E00\u4E2A\u951A\u70B9\uFF0C\u518D\u70B9\u4E00\u4E0B\u62FF\u6389\u3002\u951A\u70B9\u8981\u5728\u5EFA\u9020\u8303\u56F4\u91CC\u3002" : "\u62D6\u52A8\u865A\u7EBF\u6846\u7684\u56DB\u6761\u8FB9\uFF1A\u767D\u6846\u662F\u5EFA\u9020\u8303\u56F4\uFF0C\u84DD\u6846\u662F\u6838\u5FC3\u53EF\u4EE5\u653E\u7684\u8303\u56F4\u3002\u62D6\u52A8\u6838\u5FC3\u6539\u5B83\u7684\u9ED8\u8BA4\u4F4D\u7F6E\u3002";
+      this.drag = null;
+      this.hover = null;
+    }
+    // ------------------------------------------------------------ 进出
+    /** 开始编辑一份地图数据（会先复制一份，不动原件） */
+    begin(raw) {
+      const d = JSON.parse(JSON.stringify(raw));
+      this.draft = d;
+      const g = d.ground.map(([x, y]) => [x, y]);
+      this.pts = g.length > 1 && g[0][0] <= -20 && g[0][1] === g[1][1] ? g.slice(1) : g;
+      if (!this.pts.length) this.pts = [[0, 0]];
+      this.active = true;
+      this.panel.classList.add("on");
+      this._fillPanel();
+      this.setTool("ground");
+      this._changed();
+      this._refit = true;
+    }
+    end() {
+      this.active = false;
+      this.panel.classList.remove("on");
+      this.drag = null;
+      this.draft = null;
+    }
+    _export() {
+      const d = this.draft;
+      const pts = this.pts.map(([x, y]) => [x, y]);
+      return { ...d, ground: pts[0][0] > FAR_X ? [[FAR_X, pts[0][1]], ...pts] : pts };
+    }
+    /** 草稿改过了：重新编译、重新检查 */
+    _changed() {
+      const raw = this._export();
+      this.M = compileMapLoose(raw);
+      this.why = validateMap(raw);
+      this.status.textContent = this.why ? this.why : "\u53EF\u4EE5\u4FDD\u5B58";
+      this.status.classList.toggle("bad", !!this.why);
+      this.saveBtn.disabled = !!this.why;
+    }
+    resize(w, h, dpr) {
+      this.w = w;
+      this.h = h;
+      this.dpr = dpr || 1;
+      this._refit = true;
+    }
+    // ------------------------------------------------------------ 拾取
+    _world() {
+      return { x: this.view.wx(this.pointer.sx), y: this.view.wy(this.pointer.sy) };
+    }
+    _near(x, y, px2 = 13) {
+      return Math.hypot(this.view.sx(x) - this.pointer.sx, this.view.sy(y) - this.pointer.sy) <= px2;
+    }
+    _pick() {
+      const d = this.draft, t = this.tool;
+      if (t === "ground") {
+        for (let i = this.pts.length - 1; i >= 0; i--) if (this._near(this.pts[i][0], this.pts[i][1])) return { kind: "pt", i };
+        if (d.water != null && Math.abs(this.view.sy(d.water) - this.pointer.sy) < 7 && this.M.waterSpans.some(([a, b]) => {
+          const x2 = this._world().x;
+          return x2 > a && x2 < b;
+        })) return { kind: "water" };
+        return null;
+      }
+      if (t === "zone") {
+        if (this._near(d.core[0], d.core[1], 16)) return { kind: "core" };
+        for (const [key, Z] of [["coreZone", d.coreZone], ["build", d.build]]) {
+          const mx = (Z.xMin + Z.xMax) / 2, my = (Z.yMin + Z.yMax) / 2;
+          for (const [edge, x2, y2] of [["xMin", Z.xMin, my], ["xMax", Z.xMax, my], ["yMin", mx, Z.yMin], ["yMax", mx, Z.yMax]]) {
+            if (this._near(x2, y2, 14)) return { kind: "edge", key, edge };
+          }
+        }
+        return null;
+      }
+      const { x, y } = this._world();
+      return { kind: "anchor", x: snap(x), y: snap(y) };
+    }
+    // ------------------------------------------------------------ 输入
+    _bind() {
+      const c = this.canvas;
+      const pos = (e) => {
+        const r = c.getBoundingClientRect();
+        this.pointer.sx = e.clientX - r.left;
+        this.pointer.sy = e.clientY - r.top;
+      };
+      c.addEventListener("pointerdown", (e) => {
+        if (!this.active) return;
+        pos(e);
+        const hit = this._pick();
+        if (e.button === 1 || e.button === 0 && !hit && this.tool !== "anchor") {
+          this.drag = { kind: "pan", lx: this.pointer.sx, ly: this.pointer.sy };
+        } else if (e.button === 2) {
+          if (hit && hit.kind === "pt" && this.pts.length > 1) {
+            this.pts.splice(hit.i, 1);
+            this._changed();
+          } else this.drag = { kind: "pan", lx: this.pointer.sx, ly: this.pointer.sy };
+        } else if (e.button === 0 && hit) {
+          if (hit.kind === "anchor") this._toggleAnchor(hit.x, hit.y);
+          else this.drag = hit;
+        }
+        if (this.drag) {
+          try {
+            c.setPointerCapture(e.pointerId);
+          } catch {
+          }
+        }
+      });
+      c.addEventListener("pointermove", (e) => {
+        if (!this.active) return;
+        pos(e);
+        if (this.drag && typeof e.buttons === "number" && e.buttons === 0) this.drag = null;
+        const d = this.drag;
+        if (!d) {
+          this.hover = this._pick();
+          c.style.cursor = this.hover && this.hover.kind !== "anchor" ? "grab" : this.tool === "anchor" ? "crosshair" : "default";
+          return;
+        }
+        c.style.cursor = "grabbing";
+        if (d.kind === "pan") {
+          this.view.panBy(this.pointer.sx - d.lx, this.pointer.sy - d.ly);
+          d.lx = this.pointer.sx;
+          d.ly = this.pointer.sy;
+          return;
+        }
+        this._dragTo(d);
+      });
+      const up = () => {
+        this.drag = null;
+      };
+      c.addEventListener("pointerup", up);
+      c.addEventListener("pointercancel", up);
+      c.addEventListener("lostpointercapture", up);
+      window.addEventListener("blur", up);
+      c.addEventListener("dblclick", (e) => {
+        if (!this.active || this.tool !== "ground") return;
+        pos(e);
+        if (this._pick()) return;
+        const { x, y } = this._world();
+        const px2 = clamp(snap(x), -20, Math.floor(this.draft.fieldW / 2));
+        if (Math.abs(this.M.groundTop(x) - y) * this.view.ppm > 26 && Math.abs(this.M.groundIn(x) - y) * this.view.ppm > 26) return;
+        let i = 0;
+        while (i < this.pts.length && this.pts[i][0] <= px2) i++;
+        this.pts.splice(i, 0, [px2, clamp(snap(y), -30, 30)]);
+        this._changed();
+      });
+      c.addEventListener("wheel", (e) => {
+        if (!this.active) return;
+        e.preventDefault();
+        this.view.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 15e-4));
+      }, { passive: false });
+      c.addEventListener("contextmenu", (e) => {
+        if (this.active) e.preventDefault();
+      });
+    }
+    _dragTo(d) {
+      const { x, y } = this._world();
+      const D = this.draft, half = Math.floor(D.fieldW / 2);
+      if (d.kind === "pt") {
+        const p = this.pts[d.i];
+        const lo = d.i > 0 ? this.pts[d.i - 1][0] : Math.min(-20, p[0]), hi = d.i < this.pts.length - 1 ? this.pts[d.i + 1][0] : half;
+        const nx = clamp(snap(x), lo, hi), ny = clamp(snap(y), -30, 30);
+        const clash = (q) => q && q[0] === nx && q[1] === ny;
+        if (clash(this.pts[d.i - 1]) || clash(this.pts[d.i + 1])) return;
+        if (nx === p[0] && ny === p[1]) return;
+        p[0] = nx;
+        p[1] = ny;
+      } else if (d.kind === "water") {
+        const ny = clamp(Math.round(y * 2) / 2, -40, 40);
+        if (ny === D.water) return;
+        D.water = ny;
+        this.inWaterY.value = ny;
+      } else if (d.kind === "core") {
+        const nx = snap(x), ny = snap(y);
+        if (nx === D.core[0] && ny === D.core[1]) return;
+        D.core = [nx, ny];
+      } else if (d.kind === "edge") {
+        const Z = D[d.key];
+        const v = snap(d.edge[0] === "x" ? x : y);
+        const lim = d.key === "build" ? { xMin: [-30, Z.xMax - 2], xMax: [Z.xMin + 2, half - 1], yMin: [-30, Z.yMax - 2], yMax: [Z.yMin + 2, 40] } : { xMin: [D.build.xMin, Z.xMax - 1], xMax: [Z.xMin + 1, D.build.xMax], yMin: [D.build.yMin, Z.yMax - 1], yMax: [Z.yMin + 1, D.build.yMax] };
+        const nv = clamp(v, lim[d.edge][0], lim[d.edge][1]);
+        if (nv === Z[d.edge]) return;
+        Z[d.edge] = nv;
+        if (d.key === "build") {
+          const C3 = D.coreZone;
+          C3.xMin = clamp(C3.xMin, Z.xMin, Z.xMax - 1);
+          C3.xMax = clamp(C3.xMax, C3.xMin + 1, Z.xMax);
+          C3.yMin = clamp(C3.yMin, Z.yMin, Z.yMax - 1);
+          C3.yMax = clamp(C3.yMax, C3.yMin + 1, Z.yMax);
+        }
+      }
+      this._changed();
+    }
+    _toggleAnchor(x, y) {
+      const D = this.draft;
+      const i = D.anchors.findIndex((a) => a[0] === x && a[1] === y);
+      if (i >= 0) {
+        D.anchors.splice(i, 1);
+        this._changed();
+        return;
+      }
+      const j = D.anchors.findIndex((a) => this._near(a[0], a[1], 12));
+      if (j >= 0) {
+        D.anchors.splice(j, 1);
+        this._changed();
+        return;
+      }
+      if (!this.M.onSurface(x, y)) {
+        this.toast("\u951A\u70B9\u8981\u653E\u5728\u5730\u8868\u4E0A", "error");
+        return;
+      }
+      if (D.anchors.length >= 12) {
+        this.toast("\u6700\u591A 12 \u4E2A\u951A\u70B9", "error");
+        return;
+      }
+      D.anchors.push([x, y]);
+      this._changed();
+    }
+    // ------------------------------------------------------------ 绘制
+    draw(dt) {
+      if (!this.active || !this.ctx) return;
+      this.time += dt || 0;
+      const p = this.p, v = this.view, c = this.ctx, M = this.M, D = this.draft;
+      if (this._refit) {
+        this._refit = false;
+        v.fieldB = fieldBounds(M);
+        v.fit(v.fieldB, { l: v.w > 900 ? 320 : 24, r: 28, t: 80, b: 48 });
+      }
+      c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      p.frame(v, this.dpr, this.w, this.h, this.time, M);
+      p.paper();
+      p.grid();
+      p.water();
+      p.terrain();
+      const hot = this.tool === "zone";
+      p.zone(false, hot ? 1 : 0.55, "\u5EFA\u9020\u8303\u56F4");
+      p.zone(true, 0.3, null);
+      p.coreZone(false, hot ? 0.95 : 0.4, BP3.player, "\u6838\u5FC3\u8303\u56F4");
+      p.coreZone(true, 0.25, BP3.enemy, null);
+      c.beginPath();
+      c.setLineDash([3, 6]);
+      c.moveTo(p.al(v.sx(D.fieldW / 2)), 0);
+      c.lineTo(p.al(v.sx(D.fieldW / 2)), this.h);
+      c.strokeStyle = BP3.inkFaint;
+      c.lineWidth = 1;
+      c.stroke();
+      c.setLineDash([]);
+      p.label(v.sx(D.fieldW / 2), 64, "\u4E2D\u7EBF \xB7 \u53F3\u534A\u573A\u81EA\u52A8\u955C\u50CF", BP3.inkSoft, 11, "center", "top");
+      for (let side = 0; side < 2; side++) {
+        for (const [x, y] of D.anchors) {
+          const ok = M.onSurface(x, y);
+          const wx = side ? D.fieldW - x : x;
+          p.anchor(v.sx(wx), v.sy(y), 8, ok ? side ? BP3.enemy : BP3.anchor : BP3.invalid, M.surfaceKind(x, y) === "wall" ? side ? "right" : "left" : "down", side ? 0.45 : 1);
+        }
+        const cx = side ? D.fieldW - D.core[0] : D.core[0];
+        p.core(v.sx(cx), v.sy(D.core[1]), side ? BP3.enemy : BP3.player, v.ppm, side ? "" : "\u6838\u5FC3", side ? 0.45 : 1);
+      }
+      const h = this.drag && this.drag.kind !== "pan" ? this.drag : this.hover;
+      if (this.tool === "ground") {
+        this.pts.forEach(([x, y], i) => {
+          const on = h && h.kind === "pt" && h.i === i;
+          p.node(v.sx(x), v.sy(y), on ? 7 : 5, on ? BP3.highlight : BP3.ink, on ? BP3.highlight : BP3.paper);
+          if (on) p.label(v.sx(x), v.sy(y) - 14, `${x}, ${y}`, BP3.highlight, 11, "center", "bottom");
+        });
+        if (D.water != null && h && h.kind === "water") p.label(v.sx(this._world().x), v.sy(D.water) - 8, `\u6C34\u9762 ${D.water}`, BP3.highlight, 11, "center", "bottom");
+      } else if (this.tool === "zone") {
+        for (const [key, Z, col2] of [["build", D.build, BP3.ink], ["coreZone", D.coreZone, BP3.player]]) {
+          const mx = (Z.xMin + Z.xMax) / 2, my = (Z.yMin + Z.yMax) / 2;
+          for (const [edge, x, y] of [["xMin", Z.xMin, my], ["xMax", Z.xMax, my], ["yMin", mx, Z.yMin], ["yMax", mx, Z.yMax]]) {
+            const on = h && h.kind === "edge" && h.key === key && h.edge === edge;
+            const sx = v.sx(x), sy = v.sy(y), r = on ? 6 : 4.5;
+            c.fillStyle = on ? BP3.highlight : col2;
+            c.fillRect(p.al(sx - r), p.al(sy - r), r * 2, r * 2);
+            if (on) p.label(sx, sy - 12, String(Z[edge]), BP3.highlight, 11, "center", "bottom");
+          }
+        }
+        if (h && h.kind === "core") p.ring(v.sx(D.core[0]), v.sy(D.core[1]), 0.95 * v.ppm, BP3.highlight, 2);
+      } else if (this.hover && this.hover.kind === "anchor") {
+        const { x, y } = this.hover;
+        const has = D.anchors.some((a) => a[0] === x && a[1] === y);
+        p.ring(v.sx(x), v.sy(y), 9, has ? BP3.invalid : M.onSurface(x, y) ? BP3.valid : BP3.inkFaint, 2);
+      }
+      c.font = `600 12px ${FONT}`;
+    }
+  };
+
+  // src/ui/setup.js
+  var BP4 = THEME.bp;
+  function el2(tag, cls, parent, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function button(parent, cls, label, onClick) {
+    const b = el2("button", "btn " + cls, parent);
+    b.type = "button";
+    b.tabIndex = -1;
+    if (label) {
+      b.title = label;
+      b.setAttribute("aria-label", label);
+    }
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", (e) => {
+      if (!b.disabled) onClick(e);
+    });
+    return b;
+  }
+  var money2 = (n) => "$" + Math.round(n).toLocaleString("en-US");
+  function drawMapThumb(canvas, raw) {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = canvas.clientWidth || 220, h = canvas.clientHeight || 96;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    const c = canvas.getContext("2d");
+    if (!c) return;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.fillStyle = BP4.paper;
+    c.fillRect(0, 0, w, h);
+    let M;
+    try {
+      M = compileMapLoose(raw);
+    } catch {
+      return;
+    }
+    const B = M.build, W = M.fieldW;
+    const x0 = B.xMin - 3, x1 = W - B.xMin + 3;
+    let lo = M.hasWater ? M.waterY - 3 : Infinity, hi = Math.max(B.yMax + 1, M.gMax + 2);
+    for (const [x, y] of M.worldGround) if (x >= x0 && x <= x1) lo = Math.min(lo, y - 2);
+    lo = Math.min(lo, M.groundIn(x0) - 2, B.yMin - 1);
+    const k = Math.min(w / (x1 - x0), h / (hi - lo));
+    const ox = (w - (x1 - x0) * k) / 2, oy = (h - (hi - lo) * k) / 2;
+    const X = (x) => ox + (x - x0) * k, Y = (y) => oy + (hi - y) * k;
+    if (M.hasWater) {
+      c.fillStyle = BP4.water;
+      for (const [a, b] of M.waterSpans) c.fillRect(X(Math.max(a, x0)), Y(M.waterY), (Math.min(b, x1) - Math.max(a, x0)) * k, h);
+    }
+    const trace = () => {
+      c.beginPath();
+      let first = true;
+      for (const [x, y] of M.worldGround) {
+        const px2 = Math.max(-20, Math.min(w + 20, X(x)));
+        if (first) {
+          c.moveTo(px2, Y(y));
+          first = false;
+        } else c.lineTo(px2, Y(y));
+      }
+    };
+    trace();
+    c.lineTo(w + 20, h + 20);
+    c.lineTo(-20, h + 20);
+    c.closePath();
+    c.fillStyle = BP4.paperEdge;
+    c.fill();
+    c.fillStyle = "rgba(255,255,255,0.10)";
+    c.fill();
+    trace();
+    c.strokeStyle = BP4.ink;
+    c.lineWidth = 1.5;
+    c.lineJoin = "round";
+    c.stroke();
+    if (M.hasWater) {
+      c.strokeStyle = BP4.waterLine;
+      c.lineWidth = 1;
+      for (const [a, b] of M.waterSpans) {
+        c.beginPath();
+        c.moveTo(X(Math.max(a, x0)), Y(M.waterY));
+        c.lineTo(X(Math.min(b, x1)), Y(M.waterY));
+        c.stroke();
+      }
+    }
+    for (let side = 0; side < 2; side++) {
+      const mx = (x) => X(side ? W - x : x);
+      c.fillStyle = BP4.anchor;
+      for (const [ax, ay] of M.anchors) {
+        c.beginPath();
+        c.arc(mx(ax), Y(ay), 2.2, 0, 6.3);
+        c.fill();
+      }
+      if (M.core) {
+        c.fillStyle = side ? BP4.enemy : BP4.player;
+        c.beginPath();
+        c.arc(mx(M.core[0]), Y(M.core[1]), 3.2, 0, 6.3);
+        c.fill();
+      }
+    }
+  }
+  var SetupUI = class {
+    /**
+     * @param {{ root: HTMLElement, box: HTMLElement, actions: object }} o
+     *   box 是字标下面放按钮的容器；actions 见 main.js 的 _setupActions
+     */
+    constructor({ root, box, actions }) {
+      this.act = actions;
+      this.state = null;
+      this.isOpen = false;
+      this.mapBtn = button(box, "chip setup-chip", "\u6362\u5730\u56FE\uFF0C\u6216\u8005\u81EA\u5DF1\u753B\u4E00\u5F20", () => this.open("maps"));
+      this.mapBtn.insertAdjacentHTML("beforeend", ICON.map);
+      this.mapName = el2("span", "sc-text", this.mapBtn, "");
+      this.rivalBtn = button(box, "chip setup-chip", "\u9009\u5BF9\u624B\uFF1A\u5B88\u519B\u3001\u81EA\u5DF1\u7684\u955C\u50CF\u3001\u53E6\u4E00\u4F4D\u73A9\u5BB6\uFF0C\u6216\u8005\u5BFC\u5165\u7684\u5821\u5792", () => this.open("rival"));
+      this.rivalBtn.insertAdjacentHTML("beforeend", ICON.versus);
+      el2("span", "sc-k", this.rivalBtn, "\u5BF9\u624B");
+      this.rivalName = el2("span", "sc-text", this.rivalBtn, "");
+      this.seatSeg = el2("div", "chip seat-seg", box);
+      el2("span", "sc-k", this.seatSeg, "\u6B63\u5728\u642D");
+      this.seatBtns = [0, 1].map((s) => button(this.seatSeg, "seat-opt", "", () => this.act.editSeat(s)));
+      this.veil = el2("div", "arena setup-veil pe", root);
+      this.veil.addEventListener("pointerdown", (e) => {
+        if (e.target === this.veil) this.close();
+      });
+      const card = el2("div", "panel arena-card setup-card", this.veil);
+      const head = el2("div", "ar-head", card);
+      const ht = el2("div", "", head);
+      this.title = el2("div", "ar-title", ht, "");
+      this.sub = el2("div", "ar-sub", ht, "");
+      const x = button(head, "icon-btn sm", "\u5173\u95ED\uFF08Esc\uFF09", () => this.close());
+      x.innerHTML = ICON.close;
+      this.body = el2("div", "ar-body setup-body", card);
+      this.foot = el2("div", "setup-foot", card);
+      this.file = el2("input", "", root);
+      this.file.type = "file";
+      this.file.accept = ".json,application/json";
+      this.file.style.display = "none";
+      this.file.addEventListener("change", () => {
+        const f = this.file.files && this.file.files[0];
+        const cb = this._onFile;
+        this.file.value = "";
+        this._onFile = null;
+        if (!f || !cb) return;
+        f.text().then((t) => {
+          let o;
+          try {
+            o = JSON.parse(t);
+          } catch {
+            cb(null, f.name);
+            return;
+          }
+          cb(o, f.name.replace(/\.json$/i, ""));
+        });
+      });
+    }
+    /** 让用户选一个 JSON 文件；cb(对象 | null, 文件名) */
+    pickFile(cb) {
+      this._onFile = cb;
+      this.file.click();
+    }
+    /**
+     * @param {object} st { map:{id,name}, maps:[{id,name,raw,custom}], rival:kind, rivals:[{kind,name,desc,ok}],
+     *                      editing:0|1, hideFoe:boolean, names:[左,右] }
+     */
+    setState(st) {
+      this.state = st;
+      this.mapName.textContent = st.map.name;
+      this.rivalName.textContent = (st.rivals.find((r) => r.kind === st.rival) || {}).name || "";
+      const two = st.rival === "human";
+      this.seatSeg.classList.toggle("on", two);
+      this.seatBtns.forEach((b, s) => {
+        b.textContent = st.names[s];
+        b.classList.toggle("on", st.editing === s);
+        b.classList.toggle("p2", s === 1);
+      });
+      if (this.isOpen) this._render();
+    }
+    open(which) {
+      this.which = which;
+      this.isOpen = true;
+      this.veil.classList.add("on");
+      this._render();
+    }
+    close() {
+      this.isOpen = false;
+      this.veil.classList.remove("on");
+    }
+    _render() {
+      const st = this.state;
+      if (!st) return;
+      this.body.textContent = "";
+      this.foot.textContent = "";
+      if (this.which === "maps") this._renderMaps(st);
+      else this._renderRival(st);
+    }
+    _renderMaps(st) {
+      this.title.textContent = "\u5730\u56FE";
+      this.sub.textContent = "\u573A\u5730\u5DE6\u53F3\u5BF9\u79F0\uFF0C\u4E24\u8FB9\u6761\u4EF6\u4E00\u6837\u3002\u53EF\u4EE5\u590D\u5236\u4E00\u5F20\u6765\u6539\uFF0C\u4E5F\u53EF\u4EE5\u4ECE\u5934\u753B\u3002\u6BCF\u5F20\u5730\u56FE\u5404\u5B58\u5404\u7684\u5821\u5792\u3002";
+      const grid = el2("div", "map-grid", this.body);
+      for (const m of st.maps) {
+        const cell = el2("div", "map-cell" + (m.id === st.map.id ? " sel" : ""), grid);
+        const pick = button(cell, "map-pick", `\u7528\u300C${m.name}\u300D`, () => {
+          this.act.pickMap(m.id);
+          this.close();
+        });
+        const cv = el2("canvas", "map-thumb", pick);
+        const row = el2("div", "map-row", pick);
+        el2("span", "map-name", row, m.name);
+        if (m.id === st.map.id) {
+          const ck = el2("span", "map-on", row);
+          ck.innerHTML = ICON.check;
+        }
+        el2("div", "map-meta", pick, `${m.raw.water == null ? "\u65E0\u6C34" : "\u6709\u6C34"} \xB7 \u5BBD ${m.raw.fieldW} \u7C73 \xB7 ${money2(m.raw.budget)} \xB7 ${m.raw.maxCannons} \u95E8\u70AE${m.custom ? " \xB7 \u81EA\u5B9A\u4E49" : ""}`);
+        const tools = el2("div", "map-tools", cell);
+        const tb = (icon, label, fn) => {
+          const b = button(tools, "icon-btn sm", label, fn);
+          b.innerHTML = icon;
+          return b;
+        };
+        if (m.custom) tb(ICON.edit, "\u7F16\u8F91\u8FD9\u5F20\u5730\u56FE", () => {
+          this.close();
+          this.act.editMap(m.id);
+        });
+        tb(ICON.copy, "\u590D\u5236\u4E00\u4EFD\u6765\u6539", () => {
+          this.close();
+          this.act.copyMap(m.id);
+        });
+        tb(ICON.download, "\u5BFC\u51FA\u6210\u6587\u4EF6\uFF08\u53EF\u4EE5\u53D1\u7ED9\u522B\u4EBA\uFF0C\u6216\u8005\u7ED9 AI \u5BF9\u6218\u7528\uFF09", () => this.act.exportMap(m.id));
+        if (m.custom) {
+          const del = tb(ICON.trash, "\u5220\u9664\u8FD9\u5F20\u5730\u56FE", () => {
+            if (!del.classList.contains("armed")) {
+              del.classList.add("armed");
+              del.title = "\u518D\u70B9\u4E00\u6B21\u786E\u8BA4\u5220\u9664";
+              setTimeout(() => {
+                del.classList.remove("armed");
+                del.title = "\u5220\u9664\u8FD9\u5F20\u5730\u56FE";
+              }, 2e3);
+              return;
+            }
+            this.act.deleteMap(m.id);
+          });
+        }
+        requestAnimationFrame(() => drawMapThumb(cv, m.raw));
+      }
+      const mk = (icon, text, fn) => {
+        const b = button(this.foot, "setup-act", text, fn);
+        b.insertAdjacentHTML("beforeend", icon);
+        el2("span", "", b, text);
+      };
+      mk(ICON.plus, "\u65B0\u5EFA\u5730\u56FE", () => {
+        this.close();
+        this.act.newMap();
+      });
+      mk(ICON.upload, "\u5BFC\u5165\u5730\u56FE\u6587\u4EF6", () => this.pickFile((o, name) => this.act.importMap(o, name)));
+    }
+    _renderRival(st) {
+      this.title.textContent = "\u5BF9\u624B";
+      this.sub.textContent = "\u5DE6\u8FB9\u662F\u73A9\u5BB6 1\uFF0C\u53F3\u8FB9\u662F\u5BF9\u624B\u3002\u4EBA\u548C AI \u7528\u7684\u662F\u540C\u4E00\u5957\u5821\u5792\u6587\u4EF6\uFF1A\u5BFC\u51FA\u7684\u5821\u5792\u53EF\u4EE5\u62FF\u53BB\u6253 AI\uFF0CAI \u8BBE\u8BA1\u7684\u5821\u5792\u4E5F\u53EF\u4EE5\u5BFC\u8FDB\u6765\u6253\u3002";
+      const list = el2("div", "rival-list", this.body);
+      for (const r of st.rivals) {
+        const b = button(list, "rival-opt" + (r.kind === st.rival ? " sel" : ""), r.name, () => {
+          if (r.kind === "file") {
+            this.pickFile((o, name) => {
+              if (this.act.importRival(o, name)) this.close();
+            });
+            return;
+          }
+          this.act.rival(r.kind);
+          if (r.kind !== "human") this.close();
+        });
+        b.disabled = !r.ok;
+        const dot = el2("span", "ro-dot", b);
+        if (r.kind === st.rival) dot.innerHTML = ICON.check;
+        const tx = el2("span", "ro-text", b);
+        el2("span", "ro-name", tx, r.name);
+        el2("span", "ro-desc", tx, r.ok ? r.desc : r.why || r.desc);
+      }
+      if (st.rival === "human") {
+        const row = el2("label", "rival-check", this.body);
+        const cb = el2("input", "", row);
+        cb.type = "checkbox";
+        cb.checked = !!st.hideFoe;
+        cb.addEventListener("change", () => this.act.hideFoe(cb.checked));
+        el2("span", "", row, "\u642D\u5EFA\u65F6\u906E\u4F4F\u5BF9\u65B9\u7684\u5821\u5792\uFF08\u8F6E\u6D41\u642D\uFF0C\u4E92\u76F8\u4E0D\u770B\uFF09");
+      }
+      const mk = (icon, text, fn) => {
+        const b = button(this.foot, "setup-act", text, fn);
+        b.insertAdjacentHTML("beforeend", icon);
+        el2("span", "", b, text);
+      };
+      const me = st.rival === "human" ? st.names[st.editing] + " " : "\u6211\u65B9";
+      mk(ICON.download, `\u5BFC\u51FA${me}\u7684\u5821\u5792`, () => this.act.exportFort());
+      mk(ICON.upload, `\u5BFC\u5165${me}\u7684\u5821\u5792`, () => this.pickFile((o, name) => {
+        if (this.act.importFort(st.editing, o, name)) this.close();
+      }));
     }
   };
 
@@ -4646,7 +6035,7 @@
     const uuid = _lut[d0 & 255] + _lut[d0 >> 8 & 255] + _lut[d0 >> 16 & 255] + _lut[d0 >> 24 & 255] + "-" + _lut[d1 & 255] + _lut[d1 >> 8 & 255] + "-" + _lut[d1 >> 16 & 15 | 64] + _lut[d1 >> 24 & 255] + "-" + _lut[d2 & 63 | 128] + _lut[d2 >> 8 & 255] + "-" + _lut[d2 >> 16 & 255] + _lut[d2 >> 24 & 255] + _lut[d3 & 255] + _lut[d3 >> 8 & 255] + _lut[d3 >> 16 & 255] + _lut[d3 >> 24 & 255];
     return uuid.toLowerCase();
   }
-  function clamp(value, min, max) {
+  function clamp2(value, min, max) {
     return Math.max(min, Math.min(max, value));
   }
   function euclideanModulo(n, m) {
@@ -4991,8 +6380,8 @@
      * @return {Vector2} A reference to this vector.
      */
     clamp(min, max) {
-      this.x = clamp(this.x, min.x, max.x);
-      this.y = clamp(this.y, min.y, max.y);
+      this.x = clamp2(this.x, min.x, max.x);
+      this.y = clamp2(this.y, min.y, max.y);
       return this;
     }
     /**
@@ -5006,8 +6395,8 @@
      * @return {Vector2} A reference to this vector.
      */
     clampScalar(minVal, maxVal) {
-      this.x = clamp(this.x, minVal, maxVal);
-      this.y = clamp(this.y, minVal, maxVal);
+      this.x = clamp2(this.x, minVal, maxVal);
+      this.y = clamp2(this.y, minVal, maxVal);
       return this;
     }
     /**
@@ -5022,7 +6411,7 @@
      */
     clampLength(min, max) {
       const length = this.length();
-      return this.divideScalar(length || 1).multiplyScalar(clamp(length, min, max));
+      return this.divideScalar(length || 1).multiplyScalar(clamp2(length, min, max));
     }
     /**
      * The components of this vector are rounded down to the nearest integer value.
@@ -5147,7 +6536,7 @@
       const denominator = Math.sqrt(this.lengthSq() * v.lengthSq());
       if (denominator === 0) return Math.PI / 2;
       const theta = this.dot(v) / denominator;
-      return Math.acos(clamp(theta, -1, 1));
+      return Math.acos(clamp2(theta, -1, 1));
     }
     /**
      * Computes the distance from the given vector to this instance.
@@ -5636,7 +7025,7 @@
      * @return {number} The angle in radians.
      */
     angleTo(q) {
-      return 2 * Math.acos(Math.abs(clamp(this.dot(q), -1, 1)));
+      return 2 * Math.acos(Math.abs(clamp2(this.dot(q), -1, 1)));
     }
     /**
      * Rotates this quaternion by a given angular step to the given quaternion.
@@ -6339,9 +7728,9 @@
      * @return {Vector3} A reference to this vector.
      */
     clamp(min, max) {
-      this.x = clamp(this.x, min.x, max.x);
-      this.y = clamp(this.y, min.y, max.y);
-      this.z = clamp(this.z, min.z, max.z);
+      this.x = clamp2(this.x, min.x, max.x);
+      this.y = clamp2(this.y, min.y, max.y);
+      this.z = clamp2(this.z, min.z, max.z);
       return this;
     }
     /**
@@ -6355,9 +7744,9 @@
      * @return {Vector3} A reference to this vector.
      */
     clampScalar(minVal, maxVal) {
-      this.x = clamp(this.x, minVal, maxVal);
-      this.y = clamp(this.y, minVal, maxVal);
-      this.z = clamp(this.z, minVal, maxVal);
+      this.x = clamp2(this.x, minVal, maxVal);
+      this.y = clamp2(this.y, minVal, maxVal);
+      this.z = clamp2(this.z, minVal, maxVal);
       return this;
     }
     /**
@@ -6372,7 +7761,7 @@
      */
     clampLength(min, max) {
       const length = this.length();
-      return this.divideScalar(length || 1).multiplyScalar(clamp(length, min, max));
+      return this.divideScalar(length || 1).multiplyScalar(clamp2(length, min, max));
     }
     /**
      * The components of this vector are rounded down to the nearest integer value.
@@ -6582,7 +7971,7 @@
       const denominator = Math.sqrt(this.lengthSq() * v.lengthSq());
       if (denominator === 0) return Math.PI / 2;
       const theta = this.dot(v) / denominator;
-      return Math.acos(clamp(theta, -1, 1));
+      return Math.acos(clamp2(theta, -1, 1));
     }
     /**
      * Computes the distance from the given vector to this instance.
@@ -8410,10 +9799,10 @@
      * @return {Vector4} A reference to this vector.
      */
     clamp(min, max) {
-      this.x = clamp(this.x, min.x, max.x);
-      this.y = clamp(this.y, min.y, max.y);
-      this.z = clamp(this.z, min.z, max.z);
-      this.w = clamp(this.w, min.w, max.w);
+      this.x = clamp2(this.x, min.x, max.x);
+      this.y = clamp2(this.y, min.y, max.y);
+      this.z = clamp2(this.z, min.z, max.z);
+      this.w = clamp2(this.w, min.w, max.w);
       return this;
     }
     /**
@@ -8427,10 +9816,10 @@
      * @return {Vector4} A reference to this vector.
      */
     clampScalar(minVal, maxVal) {
-      this.x = clamp(this.x, minVal, maxVal);
-      this.y = clamp(this.y, minVal, maxVal);
-      this.z = clamp(this.z, minVal, maxVal);
-      this.w = clamp(this.w, minVal, maxVal);
+      this.x = clamp2(this.x, minVal, maxVal);
+      this.y = clamp2(this.y, minVal, maxVal);
+      this.z = clamp2(this.z, minVal, maxVal);
+      this.w = clamp2(this.w, minVal, maxVal);
       return this;
     }
     /**
@@ -8445,7 +9834,7 @@
      */
     clampLength(min, max) {
       const length = this.length();
-      return this.divideScalar(length || 1).multiplyScalar(clamp(length, min, max));
+      return this.divideScalar(length || 1).multiplyScalar(clamp2(length, min, max));
     }
     /**
      * The components of this vector are rounded down to the nearest integer value.
@@ -10261,7 +11650,7 @@
       const m31 = te[2], m32 = te[6], m33 = te[10];
       switch (order) {
         case "XYZ":
-          this._y = Math.asin(clamp(m13, -1, 1));
+          this._y = Math.asin(clamp2(m13, -1, 1));
           if (Math.abs(m13) < 0.9999999) {
             this._x = Math.atan2(-m23, m33);
             this._z = Math.atan2(-m12, m11);
@@ -10271,7 +11660,7 @@
           }
           break;
         case "YXZ":
-          this._x = Math.asin(-clamp(m23, -1, 1));
+          this._x = Math.asin(-clamp2(m23, -1, 1));
           if (Math.abs(m23) < 0.9999999) {
             this._y = Math.atan2(m13, m33);
             this._z = Math.atan2(m21, m22);
@@ -10281,7 +11670,7 @@
           }
           break;
         case "ZXY":
-          this._x = Math.asin(clamp(m32, -1, 1));
+          this._x = Math.asin(clamp2(m32, -1, 1));
           if (Math.abs(m32) < 0.9999999) {
             this._y = Math.atan2(-m31, m33);
             this._z = Math.atan2(-m12, m22);
@@ -10291,7 +11680,7 @@
           }
           break;
         case "ZYX":
-          this._y = Math.asin(-clamp(m31, -1, 1));
+          this._y = Math.asin(-clamp2(m31, -1, 1));
           if (Math.abs(m31) < 0.9999999) {
             this._x = Math.atan2(m32, m33);
             this._z = Math.atan2(m21, m11);
@@ -10301,7 +11690,7 @@
           }
           break;
         case "YZX":
-          this._z = Math.asin(clamp(m21, -1, 1));
+          this._z = Math.asin(clamp2(m21, -1, 1));
           if (Math.abs(m21) < 0.9999999) {
             this._x = Math.atan2(-m23, m22);
             this._y = Math.atan2(-m31, m11);
@@ -10311,7 +11700,7 @@
           }
           break;
         case "XZY":
-          this._z = Math.asin(-clamp(m12, -1, 1));
+          this._z = Math.asin(-clamp2(m12, -1, 1));
           if (Math.abs(m12) < 0.9999999) {
             this._x = Math.atan2(m32, m22);
             this._y = Math.atan2(m13, m11);
@@ -11975,8 +13364,8 @@
      */
     setHSL(h, s, l, colorSpace = ColorManagement.workingColorSpace) {
       h = euclideanModulo(h, 1);
-      s = clamp(s, 0, 1);
-      l = clamp(l, 0, 1);
+      s = clamp2(s, 0, 1);
+      l = clamp2(l, 0, 1);
       if (s === 0) {
         this.r = this.g = this.b = l;
       } else {
@@ -12162,7 +13551,7 @@
      */
     getHex(colorSpace = SRGBColorSpace) {
       ColorManagement.workingToColorSpace(_color.copy(this), colorSpace);
-      return Math.round(clamp(_color.r * 255, 0, 255)) * 65536 + Math.round(clamp(_color.g * 255, 0, 255)) * 256 + Math.round(clamp(_color.b * 255, 0, 255));
+      return Math.round(clamp2(_color.r * 255, 0, 255)) * 65536 + Math.round(clamp2(_color.g * 255, 0, 255)) * 256 + Math.round(clamp2(_color.b * 255, 0, 255));
     }
     /**
      * Returns the hexadecimal value of this color as a string (for example, 'FFFFFF').
@@ -18041,13 +19430,13 @@
         vec.crossVectors(tangents[i - 1], tangents[i]);
         if (vec.length() > Number.EPSILON) {
           vec.normalize();
-          const theta = Math.acos(clamp(tangents[i - 1].dot(tangents[i]), -1, 1));
+          const theta = Math.acos(clamp2(tangents[i - 1].dot(tangents[i]), -1, 1));
           normals[i].applyMatrix4(mat2.makeRotationAxis(vec, theta));
         }
         binormals[i].crossVectors(tangents[i], normals[i]);
       }
       if (closed === true) {
-        let theta = Math.acos(clamp(normals[0].dot(normals[segments]), -1, 1));
+        let theta = Math.acos(clamp2(normals[0].dot(normals[segments]), -1, 1));
         theta /= segments;
         if (tangents[0].dot(vec.crossVectors(normals[0], normals[segments])) > 0) {
           theta = -theta;
@@ -31032,7 +32421,7 @@
         const useTexStorage = texture.isVideoTexture !== true;
         const allocateMemory = sourceProperties.__version === void 0 || forceUpload === true;
         const dataReady = source.dataReady;
-        const levels = getMipLevels(texture, image);
+        const levels2 = getMipLevels(texture, image);
         if (texture.isDepthTexture) {
           glInternalFormat = getInternalDepthFormat(texture.format === DepthStencilFormat, texture.type);
           if (allocateMemory) {
@@ -31045,7 +32434,7 @@
         } else if (texture.isDataTexture) {
           if (mipmaps.length > 0) {
             if (useTexStorage && allocateMemory) {
-              state.texStorage2D(_gl.TEXTURE_2D, levels, glInternalFormat, mipmaps[0].width, mipmaps[0].height);
+              state.texStorage2D(_gl.TEXTURE_2D, levels2, glInternalFormat, mipmaps[0].width, mipmaps[0].height);
             }
             for (let i = 0, il = mipmaps.length; i < il; i++) {
               mipmap = mipmaps[i];
@@ -31061,7 +32450,7 @@
           } else {
             if (useTexStorage) {
               if (allocateMemory) {
-                state.texStorage2D(_gl.TEXTURE_2D, levels, glInternalFormat, image.width, image.height);
+                state.texStorage2D(_gl.TEXTURE_2D, levels2, glInternalFormat, image.width, image.height);
               }
               if (dataReady) {
                 updateTexture(texture, image, glFormat, glType);
@@ -31073,7 +32462,7 @@
         } else if (texture.isCompressedTexture) {
           if (texture.isCompressedArrayTexture) {
             if (useTexStorage && allocateMemory) {
-              state.texStorage3D(_gl.TEXTURE_2D_ARRAY, levels, glInternalFormat, mipmaps[0].width, mipmaps[0].height, image.depth);
+              state.texStorage3D(_gl.TEXTURE_2D_ARRAY, levels2, glInternalFormat, mipmaps[0].width, mipmaps[0].height, image.depth);
             }
             for (let i = 0, il = mipmaps.length; i < il; i++) {
               mipmap = mipmaps[i];
@@ -31113,7 +32502,7 @@
             if (texture.layerUpdates.size > 0) texture.clearLayerUpdates();
           } else {
             if (useTexStorage && allocateMemory) {
-              state.texStorage2D(_gl.TEXTURE_2D, levels, glInternalFormat, mipmaps[0].width, mipmaps[0].height);
+              state.texStorage2D(_gl.TEXTURE_2D, levels2, glInternalFormat, mipmaps[0].width, mipmaps[0].height);
             }
             for (let i = 0, il = mipmaps.length; i < il; i++) {
               mipmap = mipmaps[i];
@@ -31143,7 +32532,7 @@
         } else if (texture.isDataArrayTexture) {
           if (useTexStorage) {
             if (allocateMemory) {
-              state.texStorage3D(_gl.TEXTURE_2D_ARRAY, levels, glInternalFormat, image.width, image.height, image.depth);
+              state.texStorage3D(_gl.TEXTURE_2D_ARRAY, levels2, glInternalFormat, image.width, image.height, image.depth);
             }
             if (dataReady) {
               if (texture.layerUpdates.size > 0) {
@@ -31166,7 +32555,7 @@
         } else if (texture.isData3DTexture) {
           if (useTexStorage) {
             if (allocateMemory) {
-              state.texStorage3D(_gl.TEXTURE_3D, levels, glInternalFormat, image.width, image.height, image.depth);
+              state.texStorage3D(_gl.TEXTURE_3D, levels2, glInternalFormat, image.width, image.height, image.depth);
             }
             if (dataReady) {
               state.texSubImage3D(_gl.TEXTURE_3D, 0, 0, 0, 0, image.width, image.height, image.depth, glFormat, glType, image.data);
@@ -31177,10 +32566,10 @@
         } else if (texture.isFramebufferTexture) {
           if (allocateMemory) {
             if (useTexStorage) {
-              state.texStorage2D(_gl.TEXTURE_2D, levels, glInternalFormat, image.width, image.height);
+              state.texStorage2D(_gl.TEXTURE_2D, levels2, glInternalFormat, image.width, image.height);
             } else {
               let width = image.width, height = image.height;
-              for (let i = 0; i < levels; i++) {
+              for (let i = 0; i < levels2; i++) {
                 state.texImage2D(_gl.TEXTURE_2D, i, glInternalFormat, width, height, 0, glFormat, glType, null);
                 width >>= 1;
                 height >>= 1;
@@ -31224,7 +32613,7 @@
           if (mipmaps.length > 0) {
             if (useTexStorage && allocateMemory) {
               const dimensions = getDimensions(mipmaps[0]);
-              state.texStorage2D(_gl.TEXTURE_2D, levels, glInternalFormat, dimensions.width, dimensions.height);
+              state.texStorage2D(_gl.TEXTURE_2D, levels2, glInternalFormat, dimensions.width, dimensions.height);
             }
             for (let i = 0, il = mipmaps.length; i < il; i++) {
               mipmap = mipmaps[i];
@@ -31241,7 +32630,7 @@
             if (useTexStorage) {
               if (allocateMemory) {
                 const dimensions = getDimensions(image);
-                state.texStorage2D(_gl.TEXTURE_2D, levels, glInternalFormat, dimensions.width, dimensions.height);
+                state.texStorage2D(_gl.TEXTURE_2D, levels2, glInternalFormat, dimensions.width, dimensions.height);
               }
               if (dataReady) {
                 state.texSubImage2D(_gl.TEXTURE_2D, 0, 0, 0, glFormat, glType, image);
@@ -31290,7 +32679,7 @@
         const useTexStorage = texture.isVideoTexture !== true;
         const allocateMemory = sourceProperties.__version === void 0 || forceUpload === true;
         const dataReady = source.dataReady;
-        let levels = getMipLevels(texture, image);
+        let levels2 = getMipLevels(texture, image);
         setTextureParameters(_gl.TEXTURE_CUBE_MAP, texture);
         let mipmaps;
         if (texture.isDepthTexture) {
@@ -31306,7 +32695,7 @@
           }
         } else if (isCompressed) {
           if (useTexStorage && allocateMemory) {
-            state.texStorage2D(_gl.TEXTURE_CUBE_MAP, levels, glInternalFormat, image.width, image.height);
+            state.texStorage2D(_gl.TEXTURE_CUBE_MAP, levels2, glInternalFormat, image.width, image.height);
           }
           for (let i = 0; i < 6; i++) {
             mipmaps = cubeImage[i].mipmaps;
@@ -31338,9 +32727,9 @@
         } else {
           mipmaps = texture.mipmaps;
           if (useTexStorage && allocateMemory) {
-            if (mipmaps.length > 0) levels++;
+            if (mipmaps.length > 0) levels2++;
             const dimensions = getDimensions(cubeImage[0]);
-            state.texStorage2D(_gl.TEXTURE_CUBE_MAP, levels, glInternalFormat, dimensions.width, dimensions.height);
+            state.texStorage2D(_gl.TEXTURE_CUBE_MAP, levels2, glInternalFormat, dimensions.width, dimensions.height);
           }
           for (let i = 0; i < 6; i++) {
             if (isDataTexture) {
@@ -35337,7 +36726,7 @@ void main() {
     h ^= h >>> 16;
     return (h >>> 0) / 4294967296;
   }
-  function clamp2(v, a, b) {
+  function clamp3(v, a, b) {
     return v < a ? a : v > b ? b : v;
   }
   function smooth012(t) {
@@ -35459,7 +36848,7 @@ void main() {
     const z = SLICES[j];
     const az = Math.abs(z);
     const inBand = az <= BAND + 1e-6;
-    const t = inBand ? 0 : clamp2((az - BAND) / 1.4, 0, 1);
+    const t = inBand ? 0 : clamp3((az - BAND) / 1.4, 0, 1);
     const H = (k) => hash(side * 101 + 3, j, k);
     let R2 = t * (0.6 + 1.2 * H(1));
     let drop = 0;
@@ -35594,7 +36983,7 @@ void main() {
     const profs = profiles(side);
     let j = 0;
     while (j < SLICES.length - 2 && z > SLICES[j + 1]) j++;
-    const f = clamp2((z - SLICES[j]) / (SLICES[j + 1] - SLICES[j]), 0, 1);
+    const f = clamp3((z - SLICES[j]) / (SLICES[j + 1] - SLICES[j]), 0, 1);
     const at = (p) => {
       const pts = p.pts;
       for (let i = 1; i < p.lipIndex; i++) {
@@ -35617,10 +37006,11 @@ void main() {
   var _e = new Euler();
   var _s = new Vector3();
   var _p = new Vector3();
-  function mat(x, y, z, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) {
+  function placeMatrix(x, y, z, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) {
     _q.setFromEuler(_e.set(rx, ry, rz));
     return _m2.compose(_p.set(x, y, z), _q, _s.set(sx, sy, sz));
   }
+  var mat = placeMatrix;
   function emitFootings(b) {
     const W = CFG.fieldW;
     const bolt = new CylinderGeometry(0.055, 0.055, 0.07, 6);
@@ -35752,7 +37142,8 @@ void main() {
     const flagMounts = emitScenery(b);
     return { geometry: b.build(), flagMounts, cliffTris };
   }
-  function buildBackdrop() {
+  function buildBackdrop(base = CFG.waterY) {
+    const WY3 = base;
     const b = new GeoBuilder();
     const layers = [
       { z: -64, depth: 9, color: mix2(C.grassDark, C.tree, 0.5), hMin: 2.5, hMax: 7.5, step: 7, islands: [[-78, -40], [-14, 8], [36, 62], [86, 128]] },
@@ -35762,27 +37153,194 @@ void main() {
     layers.forEach((L, li) => {
       L.islands.forEach(([x0, x1], ii) => {
         const n = Math.max(3, Math.round((x1 - x0) / L.step));
-        const ridge = [], skirt = [], base = [];
+        const ridge = [], skirt = [], base2 = [];
         for (let k = 0; k <= n; k++) {
           const u = k / n;
           const x = x0 + (x1 - x0) * u + (k > 0 && k < n ? (hash(li, ii * 50 + k, 1) - 0.5) * L.step * 0.5 : 0);
           const env = Math.pow(Math.sin(Math.PI * u), li === 2 ? 0.35 : 0.6);
           const h = (L.hMin + (L.hMax - L.hMin) * hash(li, ii * 50 + k, 2)) * env;
           const z = L.z + (hash(li, ii * 50 + k, 3) - 0.5) * 3;
-          ridge.push([x, WY + h, z]);
-          skirt.push([x + (hash(li, ii * 50 + k, 4) - 0.5) * L.step * 0.4, WY + h * (0.35 + 0.2 * hash(li, ii * 50 + k, 5)), z + L.depth * 0.55]);
-          base.push([x, WY - 0.6, z + L.depth]);
+          ridge.push([x, WY3 + h, z]);
+          skirt.push([x + (hash(li, ii * 50 + k, 4) - 0.5) * L.step * 0.4, WY3 + h * (0.35 + 0.2 * hash(li, ii * 50 + k, 5)), z + L.depth * 0.55]);
+          base2.push([x, WY3 - 0.6, z + L.depth]);
         }
         const hTop = L.hMax;
-        const cf = (cx, cy) => shade(L.color, 0.9 + 0.2 * clamp2((cy - WY) / hTop, 0, 1));
+        const cf = (cx, cy) => shade(L.color, 0.9 + 0.2 * clamp3((cy - WY3) / hTop, 0, 1));
         for (let k = 0; k < n; k++) {
           const c1 = (ridge[k][1] + skirt[k][1]) / 2;
           b.quad(ridge[k], skirt[k], skirt[k + 1], ridge[k + 1], cf(0, c1), 0.05);
-          b.quad(skirt[k], base[k], base[k + 1], skirt[k + 1], cf(0, (skirt[k][1] + WY) / 2), 0.05);
+          b.quad(skirt[k], base2[k], base2[k + 1], skirt[k + 1], cf(0, (skirt[k][1] + WY3) / 2), 0.05);
         }
       });
     });
     return b.build();
+  }
+
+  // src/render/world-terrain-map.js
+  var ROWS = [-150, -112, -84, -62, -46, -34, -25, -18.5, -13.5, -10, -7.4, -5.4, -3.8, -2.6, -BAND, BAND, 2.5, 3.6, 5, 6.8, 9.2, 12.5, 17, 24, 34, 50, 80, 130, 230];
+  var X_PAD = 130;
+  function columns(M) {
+    const xl = -X_PAD, xr = M.fieldW + X_PAD;
+    const out = [];
+    const push = (x, y, seg) => {
+      const q = out[out.length - 1];
+      if (q && Math.abs(q.x - x) < 1e-6 && Math.abs(q.y - y) < 1e-6) return;
+      out.push({ x, y, seg });
+    };
+    for (const s of M.segs) {
+      let ax = s.ax, ay = s.ay, bx = s.bx, by = s.by;
+      if (bx < xl || ax > xr) continue;
+      if (s.kind !== "v") {
+        if (ax < xl) {
+          ay += (by - ay) * (xl - ax) / (bx - ax);
+          ax = xl;
+        }
+        if (bx > xr) {
+          by = ay + (by - ay) * (xr - ax) / (bx - ax);
+          bx = xr;
+        }
+      }
+      const near = Math.max(ax, bx) > -14 && Math.min(ax, bx) < M.fieldW + 14;
+      const step = s.kind === "v" ? 1.7 : near ? 2.1 : 9;
+      const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step));
+      for (let k = 0; k <= n; k++) push(ax + (bx - ax) * (k / n), ay + (by - ay) * (k / n), s);
+    }
+    return out;
+  }
+  function levels(M) {
+    const base = M.localGround[0][1];
+    return { base, front: M.hasWater ? M.waterY - 2.6 : base };
+  }
+  function place(M, L, c, i, z) {
+    const az = Math.abs(z);
+    if (az <= BAND + 1e-6) return [c.x, c.y, z];
+    const t = clamp3((az - BAND) / 1.6, 0, 1);
+    const H = (k) => hash(i * 7 + 3, Math.round(z * 10), k);
+    let x = c.x + (H(1) - 0.5) * 0.5 * t, y = c.y + (H(2) - 0.5) * 0.14 * t, dz = (H(3) - 0.5) * 0.4 * t;
+    if (z > 0) {
+      const f = M.hasWater ? sstep(4.4, 7.6, z) : sstep(2.2, 9.5, z);
+      y += (L.front - y) * f;
+      if (M.hasWater && c.y > M.waterY) x += (c.x < M.fieldW / 2 ? -1 : 1) * 2.2 * f;
+    } else {
+      if (!M.hasWater) y += (L.base - y) * sstep(-6, -27, z);
+      const out = Math.max(M.build.xMin - c.x, c.x - (M.fieldW - M.build.xMin), 0);
+      if (c.y > M.waterY + 0.4) y += sstep(-3.5, -14, z) * sstep(2, 20, out) * (1.4 + 2.6 * H(4));
+    }
+    return [x, y, z + dz];
+  }
+  function surfaceY(M, L, x, z) {
+    let y = M.groundTop(x);
+    if (z > BAND) y += (L.front - y) * (M.hasWater ? sstep(4.4, 7.6, z) : sstep(2.2, 9.5, z));
+    else if (z < -BAND && !M.hasWater) y += (L.base - y) * sstep(-6, -27, z);
+    return y;
+  }
+  function quadColor(M, seg, ymid, a, b) {
+    if (M.hasWater && ymid < M.waterY - 1.2) return C.under;
+    if (M.hasWater && ymid < M.waterY + 0.9) return C.rockWet;
+    const steep = seg.kind === "v" || Math.abs(seg.ey / seg.ex) > 0.75;
+    if (!steep) return hash(a, b, 5) < 0.3 ? C.grassDark : C.grass;
+    return Math.floor((ymid + 200) / 1.7) % 2 ? C.rock : C.rockDark;
+  }
+  function emitLoft(b, M, L) {
+    const cols = columns(M);
+    const rings = ROWS.map((z) => cols.map((c, i) => place(M, L, c, i, z)));
+    for (let j = 0; j < rings.length - 1; j++) {
+      const A = rings[j], B = rings[j + 1];
+      const inBand = Math.abs(ROWS[j]) <= BAND + 1e-6 && Math.abs(ROWS[j + 1]) <= BAND + 1e-6;
+      for (let i = 0; i < cols.length - 1; i++) {
+        const p = A[i], q = A[i + 1], r = B[i + 1], s = B[i];
+        const seg = cols[i + 1].seg;
+        const ymid = (p[1] + q[1] + r[1] + s[1]) / 4;
+        const flatNow = !inBand && ROWS[j] > BAND && Math.abs(q[1] - p[1]) < 0.75 * Math.abs(q[0] - p[0]);
+        const color = flatNow && !(M.hasWater && ymid < M.waterY + 0.9) ? hash(i, j, 5) < 0.3 ? C.grassDark : C.grass : quadColor(M, seg, ymid, i, j);
+        b.tri(p, s, r, color);
+        b.tri(p, r, q, color);
+      }
+    }
+  }
+  function emitFootings2(b, M) {
+    const bolt = new CylinderGeometry(0.055, 0.055, 0.07, 6);
+    for (let side = 0; side < 2; side++) {
+      for (const [lx, y] of M.anchors) {
+        const x = side === 0 ? lx : M.fieldW - lx;
+        if (M.surfaceKind(lx, y) === "wall") {
+          const dir = M.inside(x - 0.2, y) ? 1 : -1;
+          const g = new BoxGeometry(0.16, 0.84, 1.4);
+          b.addGeometry(g, placeMatrix(x - dir * 0.05, y, 0), C.anchor, { vary: 0.03 });
+          g.dispose();
+          for (const dz of [-0.5, 0.5]) for (const dy of [-0.28, 0.28]) b.addGeometry(bolt, placeMatrix(x + dir * 0.05, y + dy, dz, 0, 0, dir * Math.PI / 2), C.joint, { vary: 0.02 });
+        } else {
+          const seg = M.segs.find((s) => s.kind !== "v" && x >= s.ax - 1e-6 && x <= s.bx + 1e-6 && Math.abs(s.ay + (x - s.ax) * s.slope - y) < 1e-3) || null;
+          const ang = seg ? Math.atan2(seg.ey, seg.ex) : 0;
+          const nx = -Math.sin(ang), ny = Math.cos(ang);
+          const g = new BoxGeometry(0.84, 0.16, 1.4);
+          b.addGeometry(g, placeMatrix(x - nx * 0.05, y - ny * 0.05, 0, 0, 0, ang), C.anchor, { vary: 0.03 });
+          g.dispose();
+          for (const dz of [-0.5, 0.5]) for (const ds of [-0.28, 0.28]) {
+            b.addGeometry(bolt, placeMatrix(x + Math.cos(ang) * ds + nx * 0.05, y + Math.sin(ang) * ds + ny * 0.05, dz, 0, 0, ang), C.joint, { vary: 0.02 });
+          }
+        }
+      }
+    }
+    bolt.dispose();
+  }
+  function emitScenery2(b, M, L) {
+    const W = M.fieldW, B = M.build;
+    const dry = (x) => !M.hasWater || M.groundTop(x) > M.waterY + 0.8;
+    const level = (x) => Math.abs(M.groundTop(x + 0.7) - M.groundTop(x - 0.7)) < 0.5;
+    const inBuild = (x) => x > B.xMin - 1.5 && x < B.xMax + 1.5 || x > W - B.xMax - 1.5 && x < W - B.xMin + 1.5;
+    let trees = 0, rocks = 0;
+    for (let i = 0; i < 90 && trees < 26; i++) {
+      const x = -34 + (W + 68) * hash(i, 61);
+      let z = -3 - 13 * hash(i, 62);
+      if (inBuild(x)) z = Math.min(z, -8.5);
+      if (!dry(x) || !level(x)) continue;
+      emitTree(b, x, surfaceY(M, L, x, z), z, 0.8 + 0.7 * hash(i, 63), 300 + i);
+      trees++;
+    }
+    for (let i = 0; i < 40 && rocks < 12; i++) {
+      const x = -30 + (W + 60) * hash(i, 71);
+      const front = hash(i, 72) < 0.35 && !M.hasWater;
+      const z = front ? 3.2 + 3 * hash(i, 73) : -2.9 - 9 * hash(i, 73);
+      if (!dry(x) || !level(x)) continue;
+      emitRock(b, x, surfaceY(M, L, x, z), z, 0.3 + 0.5 * hash(i, 74), 400 + i);
+      rocks++;
+    }
+    const mounts = [];
+    for (let side = 0; side < 2; side++) {
+      const lx = B.xMin - 1.6;
+      const x = side === 0 ? lx : W - lx;
+      const gy = surfaceY(M, L, x, FLAG_Z);
+      const base = new BoxGeometry(0.62, 0.34, 0.62);
+      b.addGeometry(base, placeMatrix(x, gy + 0.1, FLAG_Z, 0, 0.3, 0), C.rockDark, { vary: 0.05 });
+      base.dispose();
+      const pole = new CylinderGeometry(0.05, 0.075, POLE_H, 6);
+      b.addGeometry(pole, placeMatrix(x, gy + POLE_H / 2, FLAG_Z), C.pole, { vary: 0.03 });
+      pole.dispose();
+      const knob = new IcosahedronGeometry(0.12, 0);
+      b.addGeometry(knob, placeMatrix(x, gy + POLE_H + 0.08, FLAG_Z), C.pole, { vary: 0.03 });
+      knob.dispose();
+      mounts.push({ x: x + 0.04, y: gy + POLE_H - 0.12, z: FLAG_Z });
+    }
+    return mounts;
+  }
+  function shoreLines(M) {
+    if (!M.hasWater) return [];
+    const out = [];
+    const zs = ROWS.filter((z) => z >= -18.5 && z <= 5);
+    for (const [x0, x1] of M.waterSpans) {
+      if (x0 > -X_PAD + 1) out.push({ dir: 1, line: zs.map((z) => [x0, z]) });
+      if (x1 < M.fieldW + X_PAD - 1) out.push({ dir: -1, line: zs.map((z) => [x1, z]) });
+    }
+    return out;
+  }
+  function buildMapTerrain(M) {
+    const b = new GeoBuilder();
+    const L = levels(M);
+    emitLoft(b, M, L);
+    emitFootings2(b, M);
+    const flagMounts = emitScenery2(b, M, L);
+    return { geometry: b.build(), flagMounts, shore: shoreLines(M), baseY: L.base };
   }
 
   // src/render/world-water.js
@@ -35794,9 +37352,12 @@ void main() {
     if (z > 40) return z > 100 ? 0.4 : 1 - 0.6 * ((z - 40) / 60);
     return z > -25 ? 1 : z < -85 ? 0.25 : 1 - 0.75 * ((-25 - z) / 60);
   }
+  var LEVEL = CFG.waterY;
+  var BED = CFG.seabedY;
+  var MID = CFG.fieldW / 2;
   function waveHeight(x, z, t) {
     const h = W1[0] * Math.sin(W1[1] * x + W1[2] * z + W1[3] * t + W1[4]) + W2[0] * Math.sin(W2[1] * x + W2[2] * z + W2[3] * t + W2[4]) + W3[0] * Math.sin(W3[1] * x + W3[2] * z + W3[3] * t + W3[4]);
-    return CFG.waterY + h * ampAt(z);
+    return LEVEL + h * ampAt(z);
   }
   function rowsZ() {
     const front = [];
@@ -35816,8 +37377,15 @@ void main() {
     return zs;
   }
   var Water = class {
-    /** faceLines: [左崖水线, 右崖水线]，每条为 [[x, z], ...]（z 从后往前） */
-    constructor(faceLines) {
+    /**
+     * shores: 岸线列表，每条为 { dir, line: [[x, z], ...] }（z 从后往前；dir = +1 表示水在 +x 一侧）
+     * opts: { waterY, bedY, midX } 水面高度、水底高度、场地中线（不传就是「海峡」的数值）
+     */
+    constructor(shores, opts = {}) {
+      LEVEL = opts.waterY ?? CFG.waterY;
+      BED = opts.bedY ?? CFG.seabedY;
+      MID = opts.midX ?? CFG.fieldW / 2;
+      const faceLines = shores;
       this.group = new Group();
       this.group.name = "water";
       this._buildSurface();
@@ -35834,7 +37402,7 @@ void main() {
       const base = new Float32Array(n * 3);
       const nrm = new Float32Array(n * 3);
       const cNear = col(THEME.world.water), cFar = col(THEME.world.waterDeep);
-      const cx = CFG.fieldW / 2;
+      const cx = MID;
       let v = 0;
       for (let k = 0; k < nz; k++) {
         const z = zs[k];
@@ -35843,7 +37411,7 @@ void main() {
         for (let i = 0; i <= NX; i++, v++) {
           const x = xL + (xR - xL) * (i / NX);
           pos[v * 3] = x;
-          pos[v * 3 + 1] = CFG.waterY;
+          pos[v * 3 + 1] = LEVEL;
           pos[v * 3 + 2] = z;
           nrm[v * 3 + 1] = 1;
           const d = Math.hypot((x - cx) / 1.4, z);
@@ -35898,7 +37466,7 @@ void main() {
     _buildSeabed() {
       const g = new PlaneGeometry(420, 380, 1, 1);
       g.rotateX(-Math.PI / 2);
-      g.translate(15, CFG.seabedY - 0.6, -20);
+      g.translate(MID, BED - 0.6, -20);
       const m = new MeshStandardMaterial({ color: shade(col(THEME.world.waterDeep), 0.3), roughness: 1, metalness: 0 });
       const mesh = new Mesh(g, m);
       mesh.name = "seabed";
@@ -35906,8 +37474,7 @@ void main() {
     }
     _buildFoam(faceLines) {
       const strips = [];
-      faceLines.forEach((line, side) => {
-        const dir = side === 0 ? 1 : -1;
+      faceLines.forEach(({ dir, line }) => {
         const pts = [];
         for (let i = 0; i < line.length - 1; i++) {
           const [x0, z0] = line[i], [x1, z1] = line[i + 1];
@@ -35975,10 +37542,16 @@ void main() {
       this._foamPa = pa;
       this.update(0);
     }
+    dispose() {
+      this.group.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) o.material.dispose();
+      });
+    }
     update(t) {
       const pos = this._pos, colr = this._col, base = this._base, n = this._n;
       const hr = this._hi[0], hg = this._hi[1], hb = this._hi[2];
-      const wy = CFG.waterY, inv = 1 / AMP_SUM;
+      const wy = LEVEL, inv = 1 / AMP_SUM;
       for (let v = 0, o = 0; v < n; v++, o += 3) {
         const y = waveHeight(pos[o], pos[o + 2], t);
         pos[o + 1] = y;
@@ -36020,7 +37593,7 @@ void main() {
     return t * t * (3 - 2 * t);
   }
   var World = class {
-    constructor({ canvas, view }) {
+    constructor({ canvas, view, map }) {
       this.view = view;
       this.canvas = canvas;
       this.blend = 0;
@@ -36043,13 +37616,91 @@ void main() {
       this.groups.fx.name = "fx";
       this._buildSky();
       this._buildLights();
-      this._buildLand();
-      this.water = new Water([waterlineFace(0), waterlineFace(1)]);
-      scene.add(this.water.group);
       this._buildClouds();
-      this._buildFlags();
+      this._landMat = new MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.92, metalness: 0 });
+      this._backMat = new MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1, metalness: 0 });
+      this._mapObjs = [];
+      this.water = null;
+      this.flags = [];
+      this.setMap(map);
       scene.add(this.groups.structure, this.groups.fx);
       this.update(0, 0);
+    }
+    /**
+     * 换地图：重建地形、水面、旗子，阴影范围跟着场地宽度走。
+     * 「海峡」用手调的悬崖（world-terrain.js），其它地图按地表折线生成（world-terrain-map.js）。
+     */
+    setMap(map) {
+      const M = getMap(map);
+      if (this.map === M) return;
+      this.map = M;
+      const scene = this.scene;
+      for (const o of this._mapObjs) {
+        scene.remove(o);
+        if (o.geometry) o.geometry.dispose();
+      }
+      this._mapObjs.length = 0;
+      for (const f of this.flags) {
+        scene.remove(f.mesh);
+        f.mesh.geometry.dispose();
+        f.mesh.material.dispose();
+      }
+      if (this.water) {
+        scene.remove(this.water.group);
+        this.water.dispose();
+        this.water = null;
+      }
+      const classic = M.raw === MAPS.strait;
+      const t = classic ? buildTerrain() : buildMapTerrain(M);
+      const land = new Mesh(t.geometry, this._landMat);
+      land.name = "terrain";
+      land.castShadow = true;
+      land.receiveShadow = true;
+      const back = new Mesh(buildBackdrop(M.hasWater ? M.waterY : t.baseY - 1.5), this._backMat);
+      back.name = "backdrop";
+      scene.add(land, back);
+      this._mapObjs.push(land, back);
+      this._flagMounts = t.flagMounts;
+      this._buildFlags();
+      if (M.hasWater) {
+        const shores = classic ? [{ dir: 1, line: waterlineFace(0) }, { dir: -1, line: waterlineFace(1) }] : t.shore;
+        this.water = new Water(shores, { waterY: M.waterY, bedY: Math.min(M.gMin, M.waterY - 4), midX: M.fieldW / 2 });
+        scene.add(this.water.group);
+      }
+      this._fitShadow();
+    }
+    /** 阴影相机紧贴「战场 + 两侧近景」这个盒子 */
+    _fitShadow() {
+      const M = this.map, sun = this.sun;
+      const W = M.fieldW;
+      const T = new Vector3(W / 2, 6, -4);
+      const dir = new Vector3(-22, 42, 28).normalize();
+      sun.position.copy(T).addScaledVector(dir, 90);
+      sun.target.position.copy(T);
+      const look = new Matrix4().lookAt(sun.position, T, new Vector3(0, 1, 0));
+      const inv = look.clone().transpose();
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, d0 = Infinity, d1 = -Infinity;
+      const v = new Vector3();
+      const lo = M.hasWater ? Math.min(-13, M.gMin) : Math.min(M.gMin, M.build.yMin) - 2;
+      const hi = Math.max(26, M.build.yMax + 14, M.gMax + 8);
+      for (const bx of [-18, W + 18]) for (const by of [lo, hi]) for (const bz of [-16, 8]) {
+        v.set(bx, by, bz).sub(sun.position).applyMatrix4(inv);
+        x0 = Math.min(x0, v.x);
+        x1 = Math.max(x1, v.x);
+        y0 = Math.min(y0, v.y);
+        y1 = Math.max(y1, v.y);
+        d0 = Math.min(d0, -v.z);
+        d1 = Math.max(d1, -v.z);
+      }
+      const cam = sun.shadow.camera;
+      cam.left = x0;
+      cam.right = x1;
+      cam.bottom = y0;
+      cam.top = y1;
+      cam.near = Math.max(0.5, d0 - 4);
+      cam.far = d1 + 4;
+      cam.updateProjectionMatrix();
+      sun.target.updateMatrixWorld();
     }
     // ------------------------------------------------------------------ 构建
     _buildSky() {
@@ -36077,52 +37728,14 @@ void main() {
       const hemi = new HemisphereLight(w.ambientSky, w.ambientGround, LIGHT.hemi);
       this.scene.add(hemi);
       const sun = new DirectionalLight(w.sun, LIGHT.sun);
-      const T = new Vector3(15, 6, -4);
-      const dir = new Vector3(-22, 42, 28).normalize();
-      sun.position.copy(T).addScaledVector(dir, 90);
-      sun.target.position.copy(T);
       sun.castShadow = true;
       sun.shadow.mapSize.set(2048, 2048);
       sun.shadow.bias = -4e-4;
       sun.shadow.normalBias = 0.02;
       sun.shadow.radius = 2.5;
-      const look = new Matrix4().lookAt(sun.position, T, new Vector3(0, 1, 0));
-      const inv = look.clone().transpose();
-      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, d0 = Infinity, d1 = -Infinity;
-      const v = new Vector3();
-      for (const bx of [-18, 48]) for (const by of [-13, 26]) for (const bz of [-16, 8]) {
-        v.set(bx, by, bz).sub(sun.position).applyMatrix4(inv);
-        x0 = Math.min(x0, v.x);
-        x1 = Math.max(x1, v.x);
-        y0 = Math.min(y0, v.y);
-        y1 = Math.max(y1, v.y);
-        d0 = Math.min(d0, -v.z);
-        d1 = Math.max(d1, -v.z);
-      }
-      const cam = sun.shadow.camera;
-      cam.left = x0;
-      cam.right = x1;
-      cam.bottom = y0;
-      cam.top = y1;
-      cam.near = Math.max(0.5, d0 - 4);
-      cam.far = d1 + 4;
-      cam.updateProjectionMatrix();
       this.scene.add(sun, sun.target);
       this.sun = sun;
       this.hemi = hemi;
-    }
-    _buildLand() {
-      const { geometry, flagMounts } = buildTerrain();
-      const mat2 = new MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.92, metalness: 0 });
-      const land = new Mesh(geometry, mat2);
-      land.name = "terrain";
-      land.castShadow = true;
-      land.receiveShadow = true;
-      this.scene.add(land);
-      this._flagMounts = flagMounts;
-      const back = new Mesh(buildBackdrop(), new MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1, metalness: 0 }));
-      back.name = "backdrop";
-      this.scene.add(back);
     }
     _buildClouds() {
       const white = col(THEME.world.cloud);
@@ -36193,8 +37806,9 @@ void main() {
       if (!(strength > 0)) return;
       this._shake = Math.min(1.2, this._shake + Math.min(1, strength));
     }
+    /** 水面高度；这张图没有水时是负无穷 */
     waterLevelAt(x, z = 0) {
-      return waveHeight(x, z, this.time);
+      return this.water ? waveHeight(x, z, this.time) : -Infinity;
     }
     update(dt, time) {
       dt = dt > 0 ? dt : 0;
@@ -36214,7 +37828,7 @@ void main() {
       const fog = this.scene.fog;
       fog.near = rig.D + FOG_NEAR;
       fog.far = rig.D + FOG_FAR;
-      this.water.update(t);
+      if (this.water) this.water.update(t);
       const cl = this.clouds;
       for (let i = 0; i < cl.length; i++) {
         const c = cl[i];
@@ -36628,7 +38242,7 @@ void main() {
         for (let i = 0; i < n; i++) {
           if (!sim.fixed[i]) continue;
           let rot = 0;
-          if (sim.y[i] < -0.01) rot = sim.x[i] < CFG.fieldW * 0.5 ? -Math.PI / 2 : Math.PI / 2;
+          if (sim.M.surfaceKind(sim.x[i], sim.y[i]) === "wall") rot = sim.M.inside(sim.x[i] - 0.2, sim.y[i]) ? -Math.PI / 2 : Math.PI / 2;
           writeRotZ(a, j * 16, sim.x[i], sim.y[i], 0, Math.cos(rot), Math.sin(rot), 1);
           j++;
         }
@@ -37145,7 +38759,7 @@ void main() {
   // src/render/fx-pool.js
   var F = {
     GROUND: 1,
-    // 落到崖顶 (y=0, x<0 或 x>fieldW) 上会弹一下然后停住
+    // 落到地面（高度由 env.groundAt(x) 给）上会弹一下然后停住
     DIE_WATER: 2,
     // 下落入水即消失（水滴）
     SINK: 4,
@@ -37343,7 +38957,7 @@ void main() {
       this.mesh.visible = false;
     }
     /**
-     * env: { fieldW, waterY, waterAt(x), miniSplash(x, y), pop(x, y) }
+     * env: { fieldW, waterY, waterAt(x), groundAt(x), miniSplash(x, y), pop(x, y) }
      */
     update(dt, env) {
       const d = this.d;
@@ -37379,10 +38993,10 @@ void main() {
           d[o + RX] += d[o + WX] * dt;
           d[o + RY] += d[o + WY2] * dt;
           d[o + RZ] += d[o + WZ] * dt;
-          if (flags & F.GROUND && d[o + STATE] === 0 && (px2 < 0 || px2 > fieldW)) {
-            const rad = 0.03;
-            if (py2 < rad && prevY >= -0.05) {
-              py2 = rad;
+          if (flags & F.GROUND && d[o + STATE] === 0) {
+            const rad = 0.03, gy = env.groundAt(px2);
+            if (py2 < gy + rad && prevY >= gy - 0.05) {
+              py2 = gy + rad;
               if (vy < -1.4) {
                 vy = -vy * 0.32;
                 vx *= 0.55;
@@ -37648,9 +39262,9 @@ void main() {
     b.ang += b.w * dt;
     b.roll += b.wroll * dt;
     const ext = Math.abs(Math.sin(b.ang)) * b.hx + Math.abs(Math.cos(b.ang)) * b.hy;
-    const overGround = b.x < 0 || b.x > env.fieldW;
-    if (overGround && b.y - ext < 0 && prevLow >= -0.08) {
-      b.y = ext;
+    const gy = env.groundAt(b.x);
+    if (b.y - ext < gy && prevLow >= gy - 0.08) {
+      b.y = gy + ext;
       if (b.landT < 0) b.landT = b.age;
       if (b.bounces === 0 && b.vy < -1.5) {
         b.vy = -b.vy * 0.28;
@@ -38024,9 +39638,11 @@ void main() {
       this._miniBudget = 8;
       const waterAt = typeof world.waterLevelAt === "function" ? (x) => world.waterLevelAt(x, 0) : () => CFG.waterY;
       this.waterAt = waterAt;
+      const map0 = world.map || getMap();
       this.env = {
-        fieldW: CFG.fieldW,
-        waterY: CFG.waterY,
+        fieldW: map0.fieldW,
+        waterY: map0.waterY,
+        groundAt: map0.groundTop,
         waterAt,
         miniSplash: (x, y) => this._miniSplash(x, y),
         pop: (x, y) => this._bubblePop(x, y),
@@ -38065,6 +39681,13 @@ void main() {
         default:
           break;
       }
+    }
+    /** 换地图：碎块落地、落水的高度跟着地图走 */
+    setMap(map) {
+      const M = getMap(map);
+      this.env.fieldW = M.fieldW;
+      this.env.waterY = M.waterY;
+      this.env.groundAt = M.groundTop;
     }
     _shake(s) {
       if (typeof this.world.addShake === "function") this.world.addShake(s);
@@ -38713,7 +40336,7 @@ void main() {
       const P = this.P, C3 = this.C;
       if (!(power > 0)) power = 0.15;
       if (power > 1) power = 1;
-      if (!(wl === wl)) wl = CFG.waterY;
+      if (!(wl === wl)) wl = this.env.waterY;
       const sp = Math.sqrt(power);
       const n = small ? Math.round(5 + 8 * power) : Math.round(8 + 16 * power);
       for (let i = 0; i < n; i++) {
@@ -39025,7 +40648,7 @@ void main() {
   function setP(param, v) {
     if (param && typeof param === "object" && "value" in param) param.value = v;
   }
-  function clamp3(v, a, b) {
+  function clamp4(v, a, b) {
     return v < a ? a : v > b ? b : v;
   }
   function rnd(a, b) {
@@ -39289,7 +40912,7 @@ void main() {
     }
     _pan(x) {
       const w = CFG && CFG.fieldW ? CFG.fieldW : 30;
-      const t = clamp3(fin2(x, w / 2) / w, 0, 1);
+      const t = clamp4(fin2(x, w / 2) / w, 0, 1);
       return -0.6 + 1.2 * t;
     }
     _event(e, sim) {
@@ -39361,7 +40984,7 @@ void main() {
           break;
         }
         case "splash": {
-          const p = clamp3(fin2(e.power, 0.5), 0.15, 1);
+          const p = clamp4(fin2(e.power, 0.5), 0.15, 1);
           const v = this._voice("splash", true, this._pan(e.x), 0.4 + 0.6 * p);
           if (!v) return;
           this._swell(v, { d: 0.6, peakAt: 0.1, g: 0.42 * p, filt: "bandpass", f: 600, mid: 1800, f1: 800, q: 1.1 });
@@ -39452,7 +41075,7 @@ void main() {
       if (pan && this.hasPanner) {
         try {
           const p = c.createStereoPanner();
-          p.pan.value = clamp3(pan, -1, 1);
+          p.pan.value = clamp4(pan, -1, 1);
           out.connect(p);
           nodes.push(p);
           tail = p;
@@ -39680,37 +41303,6 @@ void main() {
     }
   };
 
-  // src/ui/icons.js
-  var svg = (body, cls = "ic", vb = "0 0 24 24") => `<svg class="${cls}" viewBox="${vb}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
-  var ICON = {
-    play: svg('<path d="M8 5.6v12.8a.6.6 0 0 0 .9.5l10.2-6.4a.6.6 0 0 0 0-1L8.9 5.1a.6.6 0 0 0-.9.5z" fill="currentColor"/>'),
-    pause: svg('<path d="M9 6v12M15 6v12" stroke-width="2.4"/>'),
-    undo: svg('<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'),
-    redo: svg('<path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>'),
-    trash: svg('<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/>'),
-    truss: svg('<path d="M3 19h18"/><path d="M4 19l4.5-9 4.5 9 4.5-9L21 19"/><path d="M8.5 10h9"/>'),
-    move: svg('<path d="M12 3v18M3 12h18"/><path d="M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/>'),
-    erase: svg('<path d="M14 4.5l5.5 5.5-8.5 8.5H6.5l-3-3a1.4 1.4 0 0 1 0-2z"/><path d="M9 9.5l5.5 5.5"/><path d="M12 18.5h8"/>'),
-    cannon: svg('<path d="M6.5 12.2l11.3-6.6 1.8 3.1-10.6 7.4"/><circle cx="9" cy="16" r="3.4"/><path d="M3 20.5h12"/>'),
-    sound: svg('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>'),
-    mute: svg('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>'),
-    help: svg('<circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.1-2.4 3.6"/><path d="M12 17.2v.1" stroke-width="2.4"/>'),
-    back: svg('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
-    replay: svg('<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4v4.5H9"/>'),
-    close: svg('<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>'),
-    arena: svg('<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 5.5H5a3 3 0 0 0 3.2 3.9M16 5.5h3a3 3 0 0 1-3.2 3.9"/><path d="M12 13v4M8.5 20h7M9.5 17h5"/>'),
-    chev: svg('<path d="M9 6l6 6-6 6"/>'),
-    field: svg('<path d="M3 18h6l1.5-4h3L15 18h6"/><path d="M3 18V8M21 18V8"/>')
-  };
-  var SWATCH = {
-    wood: svg('<path d="M3 6h24" stroke-width="4"/>', "sw", "0 0 30 12"),
-    steel: svg('<path d="M3 3.8h24M3 8.2h24" stroke-width="1.6"/>', "sw", "0 0 30 12"),
-    rope: svg('<path d="M3 6h24" stroke-width="1.3" stroke-dasharray="3 2.6"/>', "sw", "0 0 30 12"),
-    spring: svg('<path d="M2 6h4l2-3.6 3 7.2 3-7.2 3 7.2 3-7.2 2 3.6h6" stroke-width="1.6"/>', "sw", "0 0 30 12"),
-    cannon: svg('<path d="M9 7.4l13-5 1.3 2.8-12.4 5.6"/><circle cx="10.5" cy="8.4" r="2.6"/>', "sw", "0 0 30 12"),
-    assembly: svg('<path d="M3 6h7M20 6h7" stroke-width="2.6"/><circle cx="15" cy="6" r="3.2"/>', "sw", "0 0 30 12")
-  };
-
   // src/ui/hud.js
   var HINT_KEY = "trussfort.hint.v1";
   var ROLL_MS = 260;
@@ -39737,7 +41329,7 @@ void main() {
   ];
   var raf = (fn) => typeof requestAnimationFrame === "function" ? requestAnimationFrame(fn) : setTimeout(() => fn(Date.now()), 16);
   var now2 = () => typeof performance !== "undefined" ? performance.now() : Date.now();
-  var money2 = (n) => "$" + Math.round(Math.abs(n)).toLocaleString("en-US");
+  var money3 = (n) => "$" + Math.round(Math.abs(n)).toLocaleString("en-US");
   var easeOut = (t) => 1 - Math.pow(1 - t, 3);
   function clock(sec) {
     const s = Math.max(0, Math.ceil(sec - 1e-6));
@@ -39750,7 +41342,7 @@ void main() {
       return false;
     }
   }
-  function el(tag, cls, parent, text) {
+  function el3(tag, cls, parent, text) {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
     if (text != null) e.textContent = text;
@@ -39758,12 +41350,12 @@ void main() {
     return e;
   }
   function html(tag, cls, parent, markup) {
-    const e = el(tag, cls, parent);
+    const e = el3(tag, cls, parent);
     e.innerHTML = markup;
     return e;
   }
   function keycap(parent, text, extra = "") {
-    return el("span", "kc" + (extra ? " " + extra : ""), parent, text);
+    return el3("span", "kc" + (extra ? " " + extra : ""), parent, text);
   }
   function retrigger(e, cls) {
     e.classList.remove(cls);
@@ -39789,13 +41381,13 @@ void main() {
       this._reduced = reducedMotion();
       this._spec = null;
       root.classList.add("hud");
-      this.bp = el("div", "hud-layer layer-bp", root);
-      this.bt = el("div", "hud-layer layer-bt", root);
-      this.shared = el("div", "hud-layer layer-shared on", root);
+      this.bp = el3("div", "hud-layer layer-bp", root);
+      this.bt = el3("div", "hud-layer layer-bt", root);
+      this.shared = el3("div", "hud-layer layer-shared on", root);
       this._buildBlueprint();
       this._buildBattle();
       this._buildShared();
-      this.toastBox = el("div", "toasts", root);
+      this.toastBox = el3("div", "toasts", root);
       if (typeof window !== "undefined" && window.addEventListener) {
         window.addEventListener("keydown", (e) => {
           if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -39816,7 +41408,7 @@ void main() {
     }
     // ============================================================ 构建：通用
     _button(parent, cls, onClick, label) {
-      const b = el("button", "btn " + cls, parent);
+      const b = el3("button", "btn " + cls, parent);
       b.type = "button";
       b.tabIndex = -1;
       if (label) {
@@ -39838,51 +41430,52 @@ void main() {
     // ============================================================ 构建：蓝图模式
     _buildBlueprint() {
       const L = this.bp;
-      const brand = el("div", "brand", L);
-      el("div", "brand-cn", brand, "\u6841\u5792");
-      el("div", "brand-en", brand, "TRUSSFORT");
+      const brand = el3("div", "brand", L);
+      el3("div", "brand-cn", brand, "\u6841\u5792");
+      el3("div", "brand-en", brand, "TRUSSFORT");
+      this.setupBox = el3("div", "setup pe", L);
       this.reportChip = this._button(L, "chip report-chip pe", () => {
         this._call("report");
         this.setReport(null);
       }, "\u9690\u85CF\u4E0A\u4E00\u6218\u7684\u635F\u6BC1\u6807\u8BB0");
-      el("span", "dot", this.reportChip);
-      this.reportText = el("span", "rc-text", this.reportChip, "");
-      el("span", "rc-sep", this.reportChip, "\xB7");
-      el("span", "rc-act", this.reportChip, "\u9690\u85CF\u6807\u8BB0");
-      const bud = el("div", "panel budget pe", L);
+      el3("span", "dot", this.reportChip);
+      this.reportText = el3("span", "rc-text", this.reportChip, "");
+      el3("span", "rc-sep", this.reportChip, "\xB7");
+      el3("span", "rc-act", this.reportChip, "\u9690\u85CF\u6807\u8BB0");
+      const bud = el3("div", "panel budget pe", L);
       this.budgetEl = bud;
-      const r1 = el("div", "bud-row", bud);
-      el("span", "bud-label", r1, "\u9884\u7B97");
-      this.budStatus = el("span", "bud-status", r1, "");
-      const r2 = el("div", "bud-num", bud);
-      this.budSpent = el("span", "bud-spent", r2, money2(0));
-      el("span", "bud-max", r2, "/ " + money2(CFG.budget));
-      this.deltaBox = el("span", "bud-deltas", r2);
-      const bar = el("div", "bud-bar", bud);
-      this.budFill = el("div", "bud-fill", bar);
-      const pop = el("div", "panel bud-pop", bud);
-      el("div", "pop-title", pop, "\u9020\u4EF7\u660E\u7EC6");
+      const r1 = el3("div", "bud-row", bud);
+      el3("span", "bud-label", r1, "\u9884\u7B97");
+      this.budStatus = el3("span", "bud-status", r1, "");
+      const r2 = el3("div", "bud-num", bud);
+      this.budSpent = el3("span", "bud-spent", r2, money3(0));
+      this.budMax = el3("span", "bud-max", r2, "/ " + money3(CFG.budget));
+      this.deltaBox = el3("span", "bud-deltas", r2);
+      const bar = el3("div", "bud-bar", bud);
+      this.budFill = el3("div", "bud-fill", bar);
+      const pop = el3("div", "panel bud-pop", bud);
+      el3("div", "pop-title", pop, "\u9020\u4EF7\u660E\u7EC6");
       this.popRows = {};
       for (const [k, name] of BREAKDOWN_ROWS) {
-        const row = el("div", "pop-row", pop);
+        const row = el3("div", "pop-row", pop);
         html("span", "pop-sw", row, SWATCH[k]);
-        el("span", "pop-name", row, name);
-        const meter = el("span", "pop-meter", row);
-        const fill = el("span", "pop-meter-fill", meter);
-        const val = el("span", "pop-val", row, money2(0));
+        el3("span", "pop-name", row, name);
+        const meter = el3("span", "pop-meter", row);
+        const fill = el3("span", "pop-meter-fill", meter);
+        const val = el3("span", "pop-val", row, money3(0));
         this.popRows[k] = { val, fill };
       }
-      const tot = el("div", "pop-row pop-total", pop);
-      el("span", "pop-name", tot, "\u5408\u8BA1");
-      this.popTotal = el("span", "pop-val", tot, money2(0));
+      const tot = el3("div", "pop-row pop-total", pop);
+      el3("span", "pop-name", tot, "\u5408\u8BA1");
+      this.popTotal = el3("span", "pop-val", tot, money3(0));
       let hintSeen = false;
       try {
         hintSeen = localStorage.getItem(HINT_KEY) === "1";
       } catch {
       }
-      this.hint = el("div", "panel hint pe" + (hintSeen ? " gone" : ""), L);
-      el("span", "hint-dot", this.hint);
-      el("span", "hint-text", this.hint, "\u4ECE\u951A\u70B9\u6216\u5DF2\u6709\u8282\u70B9\u62D6\u51FA\u6746\u4EF6\uFF0C\u6258\u4F4F\u6838\u5FC3\u3001\u67B6\u597D\u706B\u70AE\uFF0C\u7136\u540E\u5F00\u6218\u3002");
+      this.hint = el3("div", "panel hint pe" + (hintSeen ? " gone" : ""), L);
+      el3("span", "hint-dot", this.hint);
+      el3("span", "hint-text", this.hint, "\u4ECE\u951A\u70B9\u6216\u5DF2\u6709\u8282\u70B9\u62D6\u51FA\u6746\u4EF6\uFF0C\u6258\u4F4F\u6838\u5FC3\u3001\u67B6\u597D\u706B\u70AE\uFF0C\u7136\u540E\u5F00\u6218\u3002");
       const hx = this._button(this.hint, "icon-btn sm hint-x", () => {
         this.hint.classList.add("gone");
         try {
@@ -39891,17 +41484,17 @@ void main() {
         }
       }, "\u4E0D\u518D\u63D0\u793A");
       hx.innerHTML = ICON.close;
-      const tb = el("div", "panel toolbar pe", L);
+      const tb = el3("div", "panel toolbar pe", L);
       this.toolbar = tb;
       this.toolBtns = {};
       const toolBtn = (id, iconHtml, name, price, key) => {
         const b = this._button(tb, "tool", () => this._call("tool", id), `${name}${price ? " " + price : ""}\uFF08${key}\uFF09`);
         b.dataset.tool = id;
-        const top = el("span", "tool-top", b);
+        const top = el3("span", "tool-top", b);
         html("span", "tool-ic", top, iconHtml);
         keycap(top, key);
-        el("span", "nm", b, name);
-        if (price) el("span", "pr", b, price);
+        el3("span", "nm", b, name);
+        if (price) el3("span", "pr", b, price);
         this.toolBtns[id] = b;
         return b;
       };
@@ -39909,16 +41502,17 @@ void main() {
         const mat2 = MATERIALS[m];
         toolBtn(m, SWATCH[m], mat2.name, `$${mat2.cost}/m`, String(MATERIAL_ORDER.indexOf(m) + 1));
       }
-      const cb = toolBtn("cannon", ICON.cannon, "\u706B\u70AE", money2(CANNON.cost), "5");
-      this.cannonCount = el("span", "cnt", cb, `0/${CFG.maxCannons}`);
-      el("span", "tb-div", tb);
+      const cb = toolBtn("cannon", ICON.cannon, "\u706B\u70AE", money3(CANNON.cost), "5");
+      this._maxCannons = CFG.maxCannons;
+      this.cannonCount = el3("span", "cnt", cb, `0/${CFG.maxCannons}`);
+      el3("span", "tb-div", tb);
       toolBtn("move", ICON.move, "\u79FB\u52A8", "", "V");
       toolBtn("erase", ICON.erase, "\u62C6\u9664", "", "X");
-      el("span", "tb-div", tb);
+      el3("span", "tb-div", tb);
       const cmd = (cls, iconHtml, name, fn, keyHint) => {
         const b = this._button(tb, "cmd " + cls, fn, keyHint ? `${name}\uFF08${keyHint}\uFF09` : name);
         html("span", "cmd-ic", b, iconHtml);
-        return { b, nm: el("span", "nm", b, name) };
+        return { b, nm: el3("span", "nm", b, name) };
       };
       this.undoBtn = cmd("undo", ICON.undo, "\u64A4\u9500", () => this._call("undo"), "Ctrl/Cmd+Z").b;
       this.redoBtn = cmd("redo", ICON.redo, "\u91CD\u505A", () => this._call("redo"), "Ctrl/Cmd+Shift+Z").b;
@@ -39927,19 +41521,19 @@ void main() {
       const danger = (cls, iconHtml, name, actName) => {
         const b = this._button(tb, "cmd danger " + cls, () => this._armClick(b, actName), name);
         html("span", "cmd-ic", b, iconHtml);
-        const stack = el("span", "nm stack", b);
-        el("span", "st-a", stack, name);
-        el("span", "st-b", stack, "\u518D\u70B9\u4E00\u6B21\u786E\u8BA4");
-        el("span", "arm-tip", b, "\u518D\u70B9\u4E00\u6B21\u786E\u8BA4");
+        const stack = el3("span", "nm stack", b);
+        el3("span", "st-a", stack, name);
+        el3("span", "st-b", stack, "\u518D\u70B9\u4E00\u6B21\u786E\u8BA4");
+        el3("span", "arm-tip", b, "\u518D\u70B9\u4E00\u6B21\u786E\u8BA4");
         return b;
       };
       danger("clear", ICON.trash, "\u6E05\u7A7A", "clear");
       danger("starter", ICON.truss, "\u793A\u4F8B", "starter");
       this.goBtn = this._button(L, "go pe", () => this._call("start"), "\u5F00\u6218\uFF08Enter\uFF09");
       html("span", "go-ic", this.goBtn, ICON.play);
-      el("span", "go-text", this.goBtn, "\u5F00\u6218");
+      el3("span", "go-text", this.goBtn, "\u5F00\u6218");
       keycap(this.goBtn, "Enter", "kc-go");
-      el("span", "go-tip", this.goBtn, "\u8D85\u51FA\u9884\u7B97");
+      el3("span", "go-tip", this.goBtn, "\u8D85\u51FA\u9884\u7B97");
     }
     _armClick(b, actName) {
       const t = this._armed.get(b);
@@ -39969,66 +41563,66 @@ void main() {
       const back = this._button(L, "panel back pe", () => this._call("back"), "\u8FD4\u56DE\u84DD\u56FE\uFF08Esc\uFF09");
       html("span", "back-ic", back, ICON.back);
       this.backBtn = back;
-      this.backText = el("span", "back-text", back, "\u8FD4\u56DE\u84DD\u56FE");
+      this.backText = el3("span", "back-text", back, "\u8FD4\u56DE\u84DD\u56FE");
       keycap(back, "Esc");
-      const duel = el("div", "panel duel pe", L);
+      const duel = el3("div", "panel duel pe", L);
       this.sides = [0, 1].map((s) => {
-        const side = el("div", "duel-side " + (s === 0 ? "ds-player" : "ds-enemy"), duel);
-        const head = el("div", "ds-head", side);
-        const name = el("span", "ds-name", head, s === 0 ? "\u6211\u65B9" : "\u654C\u65B9");
-        const hp = el("span", "ds-hp", head, "");
-        const bar = el("div", "ds-bar", side);
-        const ghost = el("div", "ds-ghost", bar);
-        const fill = el("div", "ds-fill", bar);
-        el("div", "ds-flash", bar);
-        const pips = el("div", "ds-pips", side);
+        const side = el3("div", "duel-side " + (s === 0 ? "ds-player" : "ds-enemy"), duel);
+        const head = el3("div", "ds-head", side);
+        const name = el3("span", "ds-name", head, s === 0 ? "\u6211\u65B9" : "\u654C\u65B9");
+        const hp = el3("span", "ds-hp", head, "");
+        const bar = el3("div", "ds-bar", side);
+        const ghost = el3("div", "ds-ghost", bar);
+        const fill = el3("div", "ds-fill", bar);
+        el3("div", "ds-flash", bar);
+        const pips = el3("div", "ds-pips", side);
         return { side, name, hp, bar, ghost, fill, pips };
       });
-      const mid = el("div", "duel-mid", duel);
+      const mid = el3("div", "duel-mid", duel);
       duel.insertBefore(mid, this.sides[1].side);
-      this.timerEl = el("div", "timer", mid, clock(getRules().battleTime));
-      this.specCap = el("div", "panel spec-cap", L, "");
-      this.banner = el("div", "banner", L, "\u5F00\u706B");
-      const pill = el("div", "panel ctrl pe", L);
+      this.timerEl = el3("div", "timer", mid, clock(getRules().battleTime));
+      this.specCap = el3("div", "panel spec-cap", L, "");
+      this.banner = el3("div", "banner", L, "\u5F00\u706B");
+      const pill = el3("div", "panel ctrl pe", L);
       this.pauseBtn = this._button(pill, "icon-btn pause", () => this._call("pause"), "\u6682\u505C / \u7EE7\u7EED\uFF08Space\uFF09");
       this.pauseIc = html("span", "pause-ic", this.pauseBtn, ICON.pause);
       keycap(pill, "Space", "kc-inline");
-      el("span", "ctrl-div", pill);
+      el3("span", "ctrl-div", pill);
       this.speedBtns = /* @__PURE__ */ new Map();
       for (const s of SPEEDS) {
         const b = this._button(pill, "speed", () => this._call("speed", s), `${s}x \u901F\u5EA6`);
         b.textContent = `${s}x`;
         this.speedBtns.set(s, b);
       }
-      el("span", "ctrl-div", pill);
+      el3("span", "ctrl-div", pill);
       this.stressBtn = this._button(pill, "toggle stress", () => this._call("stress"), "\u53D7\u529B\u663E\u793A\uFF08T\uFF09");
-      const grad = el("span", "stress-grad", this.stressBtn);
+      const grad = el3("span", "stress-grad", this.stressBtn);
       grad.style.background = this._stressGradient();
-      el("span", "tg-text", this.stressBtn, "\u53D7\u529B\u663E\u793A");
+      el3("span", "tg-text", this.stressBtn, "\u53D7\u529B\u663E\u793A");
       keycap(this.stressBtn, "T");
       this.replayBtn = this._button(pill, "toggle replay", () => this._call("replay"), "\u91CD\u64AD\uFF08R\uFF09");
       html("span", "rp-ic", this.replayBtn, ICON.replay);
-      el("span", "tg-text", this.replayBtn, "\u91CD\u64AD");
+      el3("span", "tg-text", this.replayBtn, "\u91CD\u64AD");
       keycap(this.replayBtn, "R");
-      this.result = el("div", "result", L);
-      const card = el("div", "panel result-card pe", this.result);
-      this.rsEyebrow = el("div", "rs-eyebrow", card, "\u6218\u6597\u7ED3\u675F");
-      this.rsTitle = el("div", "rs-title", card, "");
-      this.rsReason = el("div", "rs-reason", card, "");
-      const table = el("div", "rs-table", card);
-      const hrow = el("div", "rs-row rs-head", table);
-      el("span", "rs-k", hrow, "");
-      this.rsHead = [el("span", "rs-v rs-p", hrow, "\u6211\u65B9"), el("span", "rs-v rs-e", hrow, "\u654C\u65B9")];
+      this.result = el3("div", "result", L);
+      const card = el3("div", "panel result-card pe", this.result);
+      this.rsEyebrow = el3("div", "rs-eyebrow", card, "\u6218\u6597\u7ED3\u675F");
+      this.rsTitle = el3("div", "rs-title", card, "");
+      this.rsReason = el3("div", "rs-reason", card, "");
+      const table = el3("div", "rs-table", card);
+      const hrow = el3("div", "rs-row rs-head", table);
+      el3("span", "rs-k", hrow, "");
+      this.rsHead = [el3("span", "rs-v rs-p", hrow, "\u6211\u65B9"), el3("span", "rs-v rs-e", hrow, "\u654C\u65B9")];
       this.rsCells = {};
       for (const [k, name] of [["shots", "\u5F00\u706B"], ["hits", "\u547D\u4E2D"], ["beamsLost", "\u635F\u5931\u6746\u4EF6"], ["cannonsLost", "\u635F\u5931\u706B\u70AE"], ["core", "\u6838\u5FC3\u5269\u4F59"]]) {
-        const row = el("div", "rs-row", table);
-        el("span", "rs-k", row, name);
-        this.rsCells[k] = [el("span", "rs-v", row, ""), el("span", "rs-v", row, "")];
+        const row = el3("div", "rs-row", table);
+        el3("span", "rs-k", row, name);
+        this.rsCells[k] = [el3("span", "rs-v", row, ""), el3("span", "rs-v", row, "")];
       }
-      const trow = el("div", "rs-row rs-time", table);
-      el("span", "rs-k", trow, "\u7528\u65F6");
-      this.rsTime = el("span", "rs-v rs-span", trow, "");
-      const btns = el("div", "rs-btns", card);
+      const trow = el3("div", "rs-row rs-time", table);
+      el3("span", "rs-k", trow, "\u7528\u65F6");
+      this.rsTime = el3("span", "rs-v rs-span", trow, "");
+      const btns = el3("div", "rs-btns", card);
       this.rsB1 = this._button(btns, "rs-primary", () => this._call(this._rsActs[0]), "");
       this.rsB2 = this._button(btns, "rs-second", () => this._call(this._rsActs[1]), "");
       this._rsActs = ["back", "replay"];
@@ -40048,7 +41642,7 @@ void main() {
         this._rsActs[i] = act;
         b.textContent = "";
         html("span", "rs-ic", b, icon);
-        el("span", "", b, text);
+        el3("span", "", b, text);
         keycap(b, key, i === 0 ? "kc-go" : "");
         b.setAttribute("aria-label", `${text}\uFF08${key}\uFF09`);
         b.title = `${text}\uFF08${key}\uFF09`;
@@ -40060,7 +41654,7 @@ void main() {
      */
     setSpectate(spec) {
       this._spec = spec || null;
-      const names = spec ? spec.names : ["\u6211\u65B9", "\u654C\u65B9"];
+      const names = spec ? spec.names : this._names || ["\u6211\u65B9", "\u654C\u65B9"];
       for (let s = 0; s < 2; s++) {
         this.sides[s].name.textContent = names[s];
         this.rsHead[s].textContent = names[s];
@@ -40085,12 +41679,12 @@ void main() {
     // ============================================================ 构建：右上（两种模式共用）
     _buildShared() {
       const L = this.shared;
-      const box = el("div", "topright pe", L);
+      const box = el3("div", "topright pe", L);
       this.arenaBtn = this._button(box, "panel icon-btn arena-btn bp-only", () => this._call("arena"), "\u5BF9\u6218\u56DE\u653E\uFF1A\u770B AI \u6A21\u578B\u8BBE\u8BA1\u7684\u5821\u5792\u5BF9\u6218");
       html("span", "arena-ic", this.arenaBtn, ICON.arena);
-      el("span", "arena-text", this.arenaBtn, "\u56DE\u653E");
+      el3("span", "arena-text", this.arenaBtn, "\u56DE\u653E");
       this.focusBtn = this._button(box, "panel seg", () => this._call("focus"), "\u5168\u666F / \u7279\u5199\uFF08F\uFF09");
-      this.focusOpts = { field: el("span", "seg-opt on", this.focusBtn, "\u5168\u666F"), build: el("span", "seg-opt", this.focusBtn, "\u7279\u5199") };
+      this.focusOpts = { field: el3("span", "seg-opt on", this.focusBtn, "\u5168\u666F"), build: el3("span", "seg-opt", this.focusBtn, "\u7279\u5199") };
       keycap(this.focusBtn, "F");
       this.muteBtn = this._button(box, "panel icon-btn mute", () => this._call("mute"), "\u58F0\u97F3\uFF08M\uFF09");
       this.muteIc = html("span", "mute-ic", this.muteBtn, ICON.sound);
@@ -40098,15 +41692,15 @@ void main() {
       this.helpBtn = this._button(box, "panel icon-btn help bp-only", () => this._toggleHelp(), "\u64CD\u4F5C\u8BF4\u660E\uFF08?\uFF09");
       html("span", "help-ic", this.helpBtn, ICON.help);
       keycap(this.helpBtn, "?");
-      this.helpCard = el("div", "panel help-card pe", L);
-      el("div", "help-title", this.helpCard, "\u64CD\u4F5C\u8BF4\u660E");
-      const ul = el("ul", "help-list", this.helpCard);
-      for (const line of HELP_LINES) el("li", "", ul, line);
-      const keys = el("div", "help-keys", this.helpCard);
+      this.helpCard = el3("div", "panel help-card pe", L);
+      el3("div", "help-title", this.helpCard, "\u64CD\u4F5C\u8BF4\u660E");
+      const ul = el3("ul", "help-list", this.helpCard);
+      for (const line of HELP_LINES) el3("li", "", ul, line);
+      const keys = el3("div", "help-keys", this.helpCard);
       for (const [k, t] of [["1-5", "\u9009\u6750\u6599 / \u706B\u70AE"], ["V", "\u79FB\u52A8"], ["X", "\u62C6\u9664"], ["F", "\u5168\u666F / \u7279\u5199"], ["Enter", "\u5F00\u6218"]]) {
-        const r = el("span", "hk", keys);
+        const r = el3("span", "hk", keys);
         keycap(r, k);
-        el("span", "", r, t);
+        el3("span", "", r, t);
       }
     }
     /** 工具栏若会碰到开战按钮，就切到紧凑样式（与窄屏规则相同） */
@@ -40152,6 +41746,24 @@ void main() {
         this.toolBtns[id].setAttribute("aria-pressed", on ? "true" : "false");
       }
     }
+    /** 换地图后更新上限：预算和火炮数量 */
+    setLimits({ budget, maxCannons }) {
+      this._maxCannons = maxCannons;
+      this.budMax.textContent = "/ " + money3(budget);
+    }
+    /**
+     * 对决条和结算卡上双方的名字。传 null 恢复成「我方 / 敌方」（观战回放另有 setSpectate）。
+     * 给了名字时，结算标题写「某某 胜」而不是「胜利 / 失败」。
+     */
+    setNames(names) {
+      this._names = names || null;
+      if (this._spec) return;
+      const n = names || ["\u6211\u65B9", "\u654C\u65B9"];
+      for (let s = 0; s < 2; s++) {
+        this.sides[s].name.textContent = n[s];
+        this.rsHead[s].textContent = n[s];
+      }
+    }
     setBudget({ cost = 0, budget = CFG.budget, breakdown = null, delta = 0, silent = false } = {}) {
       this._budget = budget;
       const instant = silent || this._reduced || !this._budgetInit;
@@ -40176,7 +41788,7 @@ void main() {
         this._budState = state;
       }
       this.budFill.style.transform = `scaleX(${Math.min(1, Math.max(0, r)).toFixed(4)})`;
-      this.budStatus.textContent = r > 1 ? `\u8D85\u652F ${money2(cost - budget)}` : `\u5269\u4F59 ${money2(budget - cost)}`;
+      this.budStatus.textContent = r > 1 ? `\u8D85\u652F ${money3(cost - budget)}` : `\u5269\u4F59 ${money3(budget - cost)}`;
       this.goBtn.classList.toggle("over", cost > budget);
       this.goBtn.setAttribute("aria-label", cost > budget ? "\u5F00\u6218\uFF08\u8D85\u51FA\u9884\u7B97\uFF09" : "\u5F00\u6218\uFF08Enter\uFF09");
       if (breakdown) {
@@ -40185,13 +41797,13 @@ void main() {
         for (const [k] of BREAKDOWN_ROWS) {
           const v = breakdown[k] || 0;
           const row = this.popRows[k];
-          row.val.textContent = k === "cannon" && v > 0 ? `${Math.round(v / CANNON.cost)} \u95E8 \xB7 ${money2(v)}` : money2(v);
+          row.val.textContent = k === "cannon" && v > 0 ? `${Math.round(v / CANNON.cost)} \u95E8 \xB7 ${money3(v)}` : money3(v);
           row.fill.style.transform = `scaleX(${tot > 0 ? (v / tot).toFixed(4) : 0})`;
         }
-        this.popTotal.textContent = money2(tot);
+        this.popTotal.textContent = money3(tot);
         const n = Math.round((breakdown.cannon || 0) / CANNON.cost);
-        this.cannonCount.textContent = `${n}/${CFG.maxCannons}`;
-        this.cannonCount.classList.toggle("full", n >= CFG.maxCannons);
+        this.cannonCount.textContent = `${n}/${this._maxCannons}`;
+        this.cannonCount.classList.toggle("full", n >= this._maxCannons);
         this.cannonCount.classList.toggle("zero", n === 0);
       }
     }
@@ -40210,14 +41822,14 @@ void main() {
       });
     }
     _renderSpent() {
-      const txt = money2(this._shown);
+      const txt = money3(this._shown);
       if (txt !== this._spentTxt) {
         this._spentTxt = txt;
         this.budSpent.textContent = txt;
       }
     }
     _deltaChip(d) {
-      const c = el("span", "delta " + (d > 0 ? "spend" : "refund"), this.deltaBox, (d > 0 ? "+" : "-") + money2(d));
+      const c = el3("span", "delta " + (d > 0 ? "spend" : "refund"), this.deltaBox, (d > 0 ? "+" : "-") + money3(d));
       while (this.deltaBox.children.length > 3) this.deltaBox.removeChild(this.deltaBox.children[0]);
       setTimeout(() => {
         if (c.parentNode) c.parentNode.removeChild(c);
@@ -40237,9 +41849,9 @@ void main() {
       this.reportChip.classList.add("on");
     }
     toast(text, kind = "info") {
-      const t = el("div", "panel toast " + (kind === "error" ? "err" : "info"), this.toastBox);
-      el("span", "toast-dot", t);
-      el("span", "toast-text", t, String(text));
+      const t = el3("div", "panel toast " + (kind === "error" ? "err" : "info"), this.toastBox);
+      el3("span", "toast-dot", t);
+      el3("span", "toast-text", t, String(text));
       const rec = { el: t, timer: 0 };
       const kill = () => {
         clearTimeout(rec.timer);
@@ -40351,10 +41963,10 @@ void main() {
         this._pips[s] = [];
         for (const c of sim.cannons) {
           if (c.side !== s) continue;
-          const p = el("span", "pip", S.pips);
+          const p = el3("span", "pip", S.pips);
           this._pips[s].push({ el: p, idx: c.idx, alive: true });
         }
-        if (!this._pips[s].length) el("span", "pip-none", S.pips, "\u65E0\u706B\u70AE");
+        if (!this._pips[s].length) el3("span", "pip-none", S.pips, "\u65E0\u706B\u70AE");
       }
     }
     onEvent(e, sim) {
@@ -40385,7 +41997,7 @@ void main() {
       }
     }
     showResult({ winner, reason, time = 0, stats = null, playerHp = 0, enemyHp = 0, hpMax = 0, note = "" } = {}) {
-      const names = this._spec ? this._spec.names : null;
+      const names = this._spec ? this._spec.names : this._names || null;
       const title = names ? winner === "player" ? `${names[0]} \u80DC` : winner === "enemy" ? `${names[1]} \u80DC` : "\u5E73\u5C40" : winner === "player" ? "\u80DC\u5229" : winner === "enemy" ? "\u5931\u8D25" : "\u5E73\u5C40";
       this.rsTitle.textContent = title;
       this.rsTitle.className = "rs-title " + (winner === "player" ? "win" : winner === "enemy" ? "lose" : "draw") + (names ? " named" : "");
@@ -40413,6 +42025,8 @@ void main() {
         return both ? "\u53CC\u65B9\u6838\u5FC3\u540C\u65F6\u5931\u5B88" : `${loser}\u6838\u5FC3\u88AB\u51FB\u6BC1`;
       case "coreSunk":
         return both ? "\u53CC\u65B9\u6838\u5FC3\u540C\u65F6\u5931\u5B88" : `${loser}\u6838\u5FC3\u5760\u5165\u6C34\u4E2D`;
+      case "coreGrounded":
+        return both ? "\u53CC\u65B9\u6838\u5FC3\u540C\u65F6\u5931\u5B88" : `${loser}\u6838\u5FC3\u5760\u5730\u635F\u6BC1`;
       case "timeout":
         return "\u65F6\u95F4\u5230\uFF0C\u6309\u6838\u5FC3\u5269\u4F59\u8010\u4E45\u5224\u5B9A";
       case "stalemate":
@@ -40423,9 +42037,9 @@ void main() {
   }
 
   // src/ui/arena.js
-  var REASON = { coreDestroyed: "\u6838\u5FC3\u88AB\u6BC1", coreSunk: "\u6838\u5FC3\u843D\u6C34", timeout: "\u5230\u65F6\u5224\u5B9A", stalemate: "\u53CC\u65B9\u5931\u53BB\u706B\u529B" };
+  var REASON = { coreDestroyed: "\u6838\u5FC3\u88AB\u6BC1", coreSunk: "\u6838\u5FC3\u843D\u6C34", coreGrounded: "\u6838\u5FC3\u5760\u5730", timeout: "\u5230\u65F6\u5224\u5B9A", stalemate: "\u53CC\u65B9\u5931\u53BB\u706B\u529B" };
   var shortName = (p) => p && p.id ? p.id.charAt(0).toUpperCase() + p.id.slice(1) : "?";
-  function el2(tag, cls, parent, text) {
+  function el4(tag, cls, parent, text) {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
     if (text != null) e.textContent = text;
@@ -40443,23 +42057,23 @@ void main() {
       this.isOpen = false;
       this._index = null;
       this._rendered = false;
-      this.box = el2("div", "arena pe", root);
+      this.box = el4("div", "arena pe", root);
       this.box.addEventListener("pointerdown", (e) => {
         if (e.target === this.box) this.dismiss();
       });
-      const card = el2("div", "panel arena-card", this.box);
-      const head = el2("div", "ar-head", card);
-      const ht = el2("div", "", head);
-      el2("div", "ar-title", ht, "\u5BF9\u6218\u56DE\u653E");
-      el2("div", "ar-sub", ht, "AI \u6A21\u578B\u5404\u81EA\u8BBE\u8BA1\u4E00\u5EA7\u5821\u5792\uFF0C\u5F15\u64CE\u81EA\u52A8\u5BF9\u6218\u3002\u70B9\u4EFB\u610F\u4E00\u5C40\u89C2\u770B\u3002");
-      const x = el2("button", "btn icon-btn sm", head);
+      const card = el4("div", "panel arena-card", this.box);
+      const head = el4("div", "ar-head", card);
+      const ht = el4("div", "", head);
+      el4("div", "ar-title", ht, "\u5BF9\u6218\u56DE\u653E");
+      el4("div", "ar-sub", ht, "AI \u6A21\u578B\u5404\u81EA\u8BBE\u8BA1\u4E00\u5EA7\u5821\u5792\uFF0C\u5F15\u64CE\u81EA\u52A8\u5BF9\u6218\u3002\u70B9\u4EFB\u610F\u4E00\u5C40\u89C2\u770B\u3002");
+      const x = el4("button", "btn icon-btn sm", head);
       x.type = "button";
       x.tabIndex = -1;
       x.title = "\u5173\u95ED\uFF08Esc\uFF09";
       x.setAttribute("aria-label", "\u5173\u95ED");
       x.innerHTML = ICON.close;
       x.addEventListener("click", () => this.dismiss());
-      this.body = el2("div", "ar-body", card);
+      this.body = el4("div", "ar-body", card);
     }
     /** 读取比赛清单（只读一次）。双击打开（file://）时浏览器不让读文件，会被拒绝。 */
     load() {
@@ -40479,12 +42093,12 @@ void main() {
       this.box.classList.add("on");
       if (this._rendered) return;
       this.body.textContent = "";
-      el2("div", "ar-msg", this.body, "\u6B63\u5728\u8BFB\u53D6\u6BD4\u8D5B\u8BB0\u5F55\u2026");
+      el4("div", "ar-msg", this.body, "\u6B63\u5728\u8BFB\u53D6\u6BD4\u8D5B\u8BB0\u5F55\u2026");
       this.load().then((idx) => this._render(idx), (e) => {
         this.body.textContent = "";
-        const m = el2("div", "ar-msg", this.body);
+        const m = el4("div", "ar-msg", this.body);
         if (e && e.message === "file") {
-          m.append("\u53CC\u51FB\u6253\u5F00\u65F6\u6D4F\u89C8\u5668\u4E0D\u5141\u8BB8\u8BFB\u53D6\u6BD4\u8D5B\u8BB0\u5F55\u3002", el2("br"), "\u8BF7\u6253\u5F00\u5728\u7EBF\u7248\uFF0C\u6216\u5728\u9879\u76EE\u76EE\u5F55\u8FD0\u884C node tools/serve.mjs 5173 \u540E\u8BBF\u95EE localhost:5173\u3002");
+          m.append("\u53CC\u51FB\u6253\u5F00\u65F6\u6D4F\u89C8\u5668\u4E0D\u5141\u8BB8\u8BFB\u53D6\u6BD4\u8D5B\u8BB0\u5F55\u3002", el4("br"), "\u8BF7\u6253\u5F00\u5728\u7EBF\u7248\uFF0C\u6216\u5728\u9879\u76EE\u76EE\u5F55\u8FD0\u884C node tools/serve.mjs 5173 \u540E\u8BBF\u95EE localhost:5173\u3002");
         } else m.textContent = `\u8BFB\u53D6\u5931\u8D25\uFF1A${e && e.message ? e.message : e}`;
       });
     }
@@ -40501,40 +42115,40 @@ void main() {
       this.body.textContent = "";
       const matches = idx && idx.matches || [];
       if (!matches.length) {
-        el2("div", "ar-msg", this.body, "\u8FD8\u6CA1\u6709\u6BD4\u8D5B\u8BB0\u5F55\u3002");
+        el4("div", "ar-msg", this.body, "\u8FD8\u6CA1\u6709\u6BD4\u8D5B\u8BB0\u5F55\u3002");
         return;
       }
       matches.forEach((m, mi) => {
         const names = m.players.map(shortName);
-        const d = el2("details", "ar-match", this.body);
+        const d = el4("details", "ar-match", this.body);
         if (mi === 0) d.open = true;
-        const s = el2("summary", "", d);
-        el2("span", "ar-date", s, m.date);
-        const vs = el2("span", "ar-vs", s);
-        el2("span", m.winner === 0 ? "won" : "lost", vs, names[0]);
-        el2("span", "ar-score", vs, `${m.score[0]} : ${m.score[1]}`);
-        el2("span", m.winner === 1 ? "won" : "lost", vs, names[1]);
-        const chev = el2("span", "ar-chev", s);
+        const s = el4("summary", "", d);
+        el4("span", "ar-date", s, m.date);
+        const vs = el4("span", "ar-vs", s);
+        el4("span", m.winner === 0 ? "won" : "lost", vs, names[0]);
+        el4("span", "ar-score", vs, `${m.score[0]} : ${m.score[1]}`);
+        el4("span", m.winner === 1 ? "won" : "lost", vs, names[1]);
+        const chev = el4("span", "ar-chev", s);
         chev.innerHTML = ICON.chev;
-        el2("span", "ar-models", s, `${m.players[0].label} \u5BF9 ${m.players[1].label}`);
+        el4("span", "ar-models", s, `${m.players[0].label} \u5BF9 ${m.players[1].label}`);
         m.rounds.forEach((r, ri) => {
-          const box = el2("div", "ar-round", d);
-          const rh = el2("div", "ar-rhead", box);
-          el2("span", "", rh, `\u7B2C ${r.round} \u8F6E${r.round === 1 ? " \xB7 \u76F2\u8BBE\u8BA1" : ""}`);
-          el2("span", "ar-rscore", rh, `${r.score[0]} : ${r.score[1]}`);
-          if (r.note) el2("div", "ar-note", box, r.note);
+          const box = el4("div", "ar-round", d);
+          const rh = el4("div", "ar-rhead", box);
+          el4("span", "", rh, `\u7B2C ${r.round} \u8F6E${r.round === 1 ? " \xB7 \u76F2\u8BBE\u8BA1" : ""}`);
+          el4("span", "ar-rscore", rh, `${r.score[0]} : ${r.score[1]}`);
+          if (r.note) el4("div", "ar-note", box, r.note);
           r.games.forEach((g, gi) => {
-            const b = el2("button", "btn ar-game", box);
+            const b = el4("button", "btn ar-game", box);
             b.type = "button";
             b.tabIndex = -1;
-            el2("span", "ar-gno", b, `\u7B2C ${gi + 1} \u5C40`);
-            const sides = el2("span", "ar-sides", b);
-            el2("span", "l", sides, names[g.left]);
-            el2("span", "x", sides, " \u5BF9 ");
-            el2("span", "r", sides, names[1 - g.left]);
+            el4("span", "ar-gno", b, `\u7B2C ${gi + 1} \u5C40`);
+            const sides = el4("span", "ar-sides", b);
+            el4("span", "l", sides, names[g.left]);
+            el4("span", "x", sides, " \u5BF9 ");
+            el4("span", "r", sides, names[1 - g.left]);
             const who = g.winner == null ? "\u5E73\u5C40" : `${names[g.winner]} \u80DC`;
-            el2("span", "ar-res", b, `${who} \xB7 ${REASON[g.reason] || g.reason} \xB7 ${g.seconds} \u79D2`);
-            const pl = el2("span", "ar-play", b);
+            el4("span", "ar-res", b, `${who} \xB7 ${REASON[g.reason] || g.reason} \xB7 ${g.seconds} \u79D2`);
+            const pl = el4("span", "ar-play", b);
             pl.innerHTML = ICON.play;
             b.addEventListener("click", () => {
               if (this.onPlay) this.onPlay(m, ri, gi);
@@ -40548,20 +42162,44 @@ void main() {
 
   // src/ai/api.js
   var DEG7 = Math.PI / 180;
-  var FOE_CORE2 = [CFG.fieldW - CFG.corePos[0], CFG.corePos[1]];
   var r3 = (v) => Math.round(v * 1e3) / 1e3;
-  function rules(version) {
+  function rules(version, map) {
     const R2 = getRules(version);
+    const M = getMap(map);
+    const Z = M.coreZone;
     return {
       version: R2.id,
-      units: "\u7C73\uFF0Cy \u5411\u4E0A\u3002\u672C\u5730\u5750\u6807\uFF1A\u5DF1\u65B9\u5D16\u9876 y=0\uFF08x<=0 \u662F\u5C71\u4F53\u9876\u9762\uFF09\uFF0C\u5D16\u58C1\u5728 x=0\uFF0C\u671D +x \u5F00\u706B",
-      field: { width: CFG.fieldW, waterY: CFG.waterY, foeCore: FOE_CORE2 },
+      units: "\u7C73\uFF0Cy \u5411\u4E0A\u3002\u672C\u5730\u5750\u6807\uFF1A\u671D +x \u5F00\u706B\uFF1B\u573A\u5730\u5DE6\u53F3\u5BF9\u79F0\uFF0C\u5BF9\u65B9\u7684\u70B9 (x, y) \u5728\u5DF1\u65B9\u5750\u6807\u91CC\u662F (fieldW - x, y)",
+      map: {
+        id: M.id,
+        name: M.name,
+        fieldWidth: M.fieldW,
+        ground: M.ground,
+        groundNote: "\u5DF1\u65B9\u534A\u573A\u7684\u5730\u9762\u8F6E\u5ED3\uFF0C\u4ECE\u540E\u65B9\u753B\u5230\u4E2D\u7EBF\uFF08x = fieldWidth / 2\uFF09\uFF0C\u7B2C\u4E00\u4E2A\u70B9\u5F80\u5DE6\u3001\u6700\u540E\u4E00\u4E2A\u70B9\u5230\u4E2D\u7EBF\u6309\u6C34\u5E73\u5EF6\u4F38\uFF1B\u8F6E\u5ED3\u4E0B\u65B9\u662F\u5B9E\u5FC3\u7684\u5730\u3002\u5BF9\u65B9\u534A\u573A\u662F\u955C\u50CF",
+        water: M.water,
+        waterNote: M.hasWater ? `\u6C34\u9762\u5728 y = ${M.water}\u3002\u6389\u8FDB\u6C34\u91CC\u7684\u4E1C\u897F\u4F1A\u6C89\u6CA1\uFF0C\u6838\u5FC3\u843D\u6C34\u5373\u5224\u8D1F` : "\u8FD9\u5F20\u56FE\u6CA1\u6709\u6C34"
+      },
+      field: { width: M.fieldW, waterY: M.water, foeCore: M.foeCore },
       grid: CFG.grid,
-      buildZone: CFG.build,
-      forbidden: "\u8282\u70B9\u4E0D\u80FD\u5728\u5C71\u4F53\u5185\u90E8\uFF08x<0 \u4E14 y<0\uFF09\uFF1B\u6746\u4EF6\u4E0D\u80FD\u7A7F\u8FC7\u5C71\u4F53",
-      anchors: CFG.anchors,
-      core: { at: CFG.corePos, mass: CORE.mass, hp: CORE.hp, radius: CORE.radius, note: "\u6838\u5FC3\u56FA\u5B9A\u5728\u8FD9\u91CC\uFF0C\u662F\u4E00\u4E2A\u666E\u901A\u8282\u70B9\uFF0C\u5FC5\u987B\u9760\u6746\u4EF6\u6258\u4F4F\uFF1B\u8010\u4E45\u5F52\u96F6\u6216\u843D\u6C34\u5373\u5224\u8D1F" },
-      budget: CFG.budget,
+      buildZone: M.build,
+      forbidden: "\u8282\u70B9\u4E0D\u80FD\u5728\u5730\u9762\u8F6E\u5ED3\u4EE5\u4E0B\uFF08\u5730\u91CC\uFF09\uFF1B\u6746\u4EF6\u4E0D\u80FD\u7A7F\u8FC7\u5730\u91CC\uFF08\u8D34\u7740\u5730\u8868\u8D70\u53EF\u4EE5\uFF09",
+      anchors: M.anchors,
+      core: {
+        at: M.core,
+        mass: CORE.mass,
+        hp: CORE.hp,
+        radius: CORE.radius,
+        movable: !!R2.coreZone,
+        zone: R2.coreZone ? Z : { xMin: M.core[0], xMax: M.core[0], yMin: M.core[1], yMax: M.core[1] },
+        foeDefault: M.foeCore,
+        foeZone: R2.coreZone ? { xMin: M.fieldW - Z.xMax, xMax: M.fieldW - Z.xMin, yMin: Z.yMin, yMax: Z.yMax } : null,
+        note: [
+          R2.coreZone ? `\u6838\u5FC3\u53EF\u4EE5\u653E\u5728 zone \u8303\u56F4\u91CC\u7684\u4EFB\u610F\u6574\u6570\u7F51\u683C\u70B9\uFF08\u5821\u5792\u63CF\u8FF0\u91CC\u5199 "core": [x, y]\uFF1B\u4E0D\u5199\u5C31\u5728 at\uFF09\u3002\u5BF9\u65B9\u7684\u6838\u5FC3\u540C\u6837\u53EF\u4EE5\u632A\uFF0C\u5F00\u6218\u524D\u4F60\u4E0D\u77E5\u9053\u5B83\u5728\u54EA\uFF0C\u53EA\u77E5\u9053\u5728 foeZone \u91CC` : "\u6838\u5FC3\u56FA\u5B9A\u5728 at",
+          "\u6838\u5FC3\u662F\u4E00\u4E2A\u666E\u901A\u8282\u70B9\uFF0C\u5FC5\u987B\u9760\u6746\u4EF6\u6258\u4F4F",
+          `\u8010\u4E45\u5F52\u96F6${M.hasWater ? "\u3001\u843D\u6C34" : ""}${R2.coreGroundKill ? "\u3001\u78B0\u5230\u5730\u9762" : ""}\u5373\u5224\u8D1F`
+        ].join("\uFF1B")
+      },
+      budget: M.budget,
       materials: MATERIAL_ORDER.map((id) => {
         const m = MATERIALS[id];
         return {
@@ -40580,12 +42218,12 @@ void main() {
       overlap: R2.noOverlap ? "\u4E24\u6839\u6746\u4E0D\u80FD\u6709\u4E00\u6BB5\u53E0\u5728\u540C\u4E00\u6761\u7EBF\u4E0A" : "\u5141\u8BB8\u6746\u4EF6\u91CD\u53E0",
       cannon: {
         cost: CANNON.cost,
-        max: CFG.maxCannons,
+        max: M.maxCannons,
         mass: CANNON.mass,
         hp: CANNON.hp,
         mountRule: [
           R2.anchorMounts ? null : "\u70AE\u5EA7\u6746\u4EF6\u7684\u4E24\u7AEF\u90FD\u4E0D\u80FD\u662F\u951A\u70B9",
-          R2.groundMounts ? null : "\u70AE\u5EA7\u7684\u4E24\u7AEF\u4E0D\u80FD\u5728\u5730\u9762\u4E0A\uFF08\u5D16\u9876\u9762 y=0 \u4E14 x<=0\uFF0C\u6216\u5D16\u58C1 x=0 \u4E14 y<=0\uFF09\uFF1B\u6218\u6597\u4E2D\u70AE\u5EA7\u8282\u70B9\u78B0\u5230\u5730\u9762\u7684\u70AE\u4E0D\u80FD\u5F00\u706B"
+          R2.groundMounts ? null : "\u70AE\u5EA7\u7684\u4E24\u7AEF\u4E0D\u80FD\u8D34\u5728\u5730\u8868\u4E0A\uFF1B\u6218\u6597\u4E2D\u70AE\u5EA7\u8282\u70B9\u78B0\u5230\u5730\u9762\u7684\u70AE\u4E0D\u80FD\u5F00\u706B"
         ].filter(Boolean).join("\uFF1B") || "\u6CA1\u6709\u989D\u5916\u9650\u5236",
         mountMaterials: CANNON.mountMats,
         minMountLength: CANNON.minBeamLen,
@@ -40612,7 +42250,7 @@ void main() {
       battle: {
         settleSeconds: CFG.settleTime,
         timeLimit: R2.battleTime,
-        win: `\u5BF9\u65B9\u6838\u5FC3\u8010\u4E45\u5F52\u96F6\u6216\u843D\u6C34\uFF1B\u5230\u65F6\u672A\u5206\u80DC\u8D1F\u5219\u6838\u5FC3\u5269\u4F59\u8010\u4E45\u591A\u8005\u80DC${R2.drawMargin ? `\uFF0C\u76F8\u5DEE\u4E0D\u8D85\u8FC7 ${Math.round(R2.drawMargin * CORE.hp)} \u70B9\u7B97\u5E73\u5C40` : ""}`,
+        win: `\u5BF9\u65B9\u6838\u5FC3\u8010\u4E45\u5F52\u96F6${M.hasWater ? "\u3001\u843D\u6C34" : ""}${R2.coreGroundKill ? "\u3001\u78B0\u5230\u5730\u9762" : ""}\uFF1B\u5230\u65F6\u672A\u5206\u80DC\u8D1F\u5219\u6838\u5FC3\u5269\u4F59\u8010\u4E45\u591A\u8005\u80DC${R2.drawMargin ? `\uFF0C\u76F8\u5DEE\u4E0D\u8D85\u8FC7 ${Math.round(R2.drawMargin * CORE.hp)} \u70B9\u7B97\u5E73\u5C40` : ""}`,
         entry: R2.needCannon ? "\u53C2\u8D5B\u5821\u5792\u81F3\u5C11\u8981\u6709\u4E00\u95E8\u6C89\u964D\u540E\u8FD8\u80FD\u5F00\u706B\u7684\u706B\u70AE" : "\u6CA1\u6709\u989D\u5916\u8981\u6C42",
         automatic: "\u5F00\u6218\u540E\u53CC\u65B9\u5168\u81EA\u52A8\uFF0C\u5C04\u89D2\u5728\u84DD\u56FE\u91CC\u5B9A\u597D\uFF1B\u540C\u6837\u7684\u4E24\u5EA7\u5821\u5792 + \u540C\u6837\u7684\u79CD\u5B50\uFF0C\u7ED3\u679C\u5B8C\u5168\u76F8\u540C"
       },
@@ -40624,10 +42262,10 @@ void main() {
     e.fortError = true;
     return e;
   }
-  function loadFort(desc, side = "player", rules2) {
+  function loadFort(desc, side = "player", rules2, map) {
     if (!desc || typeof desc !== "object") throw fail("\u5821\u5792\u63CF\u8FF0\u5FC5\u987B\u662F\u4E00\u4E2A\u5BF9\u8C61");
     if (desc instanceof Blueprint) {
-      const bp2 = Blueprint.fromJSON(desc.toJSON(), side, rules2 || desc.rules);
+      const bp2 = Blueprint.fromJSON(desc.toJSON(), side, rules2 || desc.rules, map || desc.map);
       const why = bp2.validate();
       if (why) throw fail(why);
       return bp2;
@@ -40635,7 +42273,7 @@ void main() {
     if (Array.isArray(desc.nodes)) {
       let bp2;
       try {
-        bp2 = Blueprint.fromJSON(desc, side, rules2);
+        bp2 = Blueprint.fromJSON(desc, side, rules2, map);
       } catch (e) {
         throw fail("\u5B58\u6863\u683C\u5F0F\u65E0\u6CD5\u89E3\u6790\uFF1A" + e.message);
       }
@@ -40644,7 +42282,13 @@ void main() {
       return bp2;
     }
     if (!Array.isArray(desc.beams)) throw fail("\u7F3A\u5C11 beams \u6570\u7EC4");
-    const bp = new Blueprint(side, rules2);
+    const bp = new Blueprint(side, rules2, map);
+    const FOE_CORE = bp.map.foeCore;
+    if (desc.core !== void 0 && desc.core !== null) {
+      if (!Array.isArray(desc.core) || desc.core.length < 2) throw fail("core \u5E94\u4E3A [x, y]");
+      const r = bp.setCore(desc.core[0], desc.core[1]);
+      if (!r.ok) throw fail(`core (${desc.core[0]},${desc.core[1]})\uFF1A${r.reason}`);
+    }
     const named = desc.nodes && typeof desc.nodes === "object" ? desc.nodes : {};
     const ids = /* @__PURE__ */ new Map();
     const nodeOf = (ref, what) => {
@@ -40682,7 +42326,7 @@ void main() {
       if (typeof aim === "number") {
         if (!Number.isFinite(aim)) throw fail(`${what}\uFF1A\u5C04\u89D2\u65E0\u6548`);
       } else if (aim && typeof aim === "object") {
-        const t = Array.isArray(aim.at) ? aim.at : [FOE_CORE2[0] + (aim.dx || 0), FOE_CORE2[1] + (aim.dy || 0)];
+        const t = Array.isArray(aim.at) ? aim.at : [FOE_CORE[0] + (aim.dx || 0), FOE_CORE[1] + (aim.dy || 0)];
         const pose = bp.cannonPose(bp.cannons.get(r.id));
         const ang = solveAngle(pose.px, pose.py, t[0], t[1], !!aim.high);
         if (ang == null) throw fail(`${what}\uFF1A\u4ECE\u8FD9\u4E2A\u4F4D\u7F6E\u6253\u4E0D\u5230\u76EE\u6807 (${t})`);
@@ -40696,7 +42340,9 @@ void main() {
       const n = bp.nodes.get(id);
       return [n.x, n.y];
     };
+    const core = bp.coreNode();
     const out = {
+      core: [core.x, core.y],
       beams: [...bp.beams.values()].map((b) => [pt(b.a), pt(b.b), b.mat]),
       cannons: [...bp.cannons.values()].map((c) => {
         const b = bp.beams.get(c.beam);
@@ -40707,8 +42353,9 @@ void main() {
   }
   function formatFort(desc) {
     const rows = (arr) => (arr || []).map((r) => "    " + JSON.stringify(r)).join(",\n");
-    const head = desc.name ? `  "name": ${JSON.stringify(desc.name)},
-` : "";
+    const head = (desc.name ? `  "name": ${JSON.stringify(desc.name)},
+` : "") + (desc.core ? `  "core": ${JSON.stringify(desc.core)},
+` : "");
     return `{
 ${head}  "beams": [
 ${rows(desc.beams)}
@@ -40723,6 +42370,31 @@ ${rows(desc.cannons)}
   // src/main.js
   var SAVE_KEY = "trussfort.blueprint.v1";
   var TIP_KEY = "trussfort.tip.v1";
+  var MAP_KEY = "trussfort.map.v1";
+  var MAPS_KEY = "trussfort.maps.v1";
+  var fortKey = (mapId, seat) => `trussfort.fort.v2.${mapId}.${seat}`;
+  var rivalKey = (mapId) => `trussfort.rival.v1.${mapId}`;
+  var SEAT_NAMES = ["\u73A9\u5BB6 1", "\u73A9\u5BB6 2"];
+  var RIVALS = [
+    { kind: "preset", name: "\u5B88\u519B", desc: "\u8FD9\u5F20\u56FE\u81EA\u5E26\u7684\u5BF9\u624B", why: "\u8FD9\u5F20\u56FE\u6CA1\u6709\u81EA\u5E26\u7684\u5BF9\u624B" },
+    { kind: "mirror", name: "\u955C\u50CF", desc: "\u548C\u81EA\u5DF1\u8FD9\u5EA7\u5821\u5792\u7684\u590D\u5236\u54C1\u6253\u4E00\u573A" },
+    { kind: "human", name: "\u73A9\u5BB6 2", desc: "\u4E24\u4E2A\u4EBA\u5728\u540C\u4E00\u53F0\u7535\u8111\u4E0A\u8F6E\u6D41\u642D\u5EFA\uFF0C\u518D\u5F00\u6218" },
+    { kind: "file", name: "\u5BFC\u5165\u7684\u5821\u5792", desc: "\u4ECE\u6587\u4EF6\u8F7D\u5165\uFF0C\u6BD4\u5982 AI \u8BBE\u8BA1\u7684\u5821\u5792\uFF08\u4E5F\u53EF\u4EE5\u628A\u6587\u4EF6\u62D6\u5230\u7A97\u53E3\u53F3\u534A\u8FB9\uFF09" }
+  ];
+  var ls = (k) => {
+    try {
+      return localStorage.getItem(k);
+    } catch {
+      return null;
+    }
+  };
+  var lsSet = (k, v) => {
+    try {
+      if (v == null) localStorage.removeItem(k);
+      else localStorage.setItem(k, v);
+    } catch {
+    }
+  };
   var T_IN = 1.5;
   var T_OUT = 0.7;
   var RESULT_DELAY = 1.6;
@@ -40746,9 +42418,19 @@ ${rows(desc.cannons)}
       this.glCanvas = document.getElementById("gl");
       this.bpCanvas = document.getElementById("bp");
       this.uiRoot = document.getElementById("ui");
-      this.view = new View();
-      this.player = this._loadSaved() || makeStarterFort();
-      this.enemy = makeEnemyFort();
+      this.customMaps = this._loadCustomMaps();
+      this.map = this._openMap(ls(MAP_KEY));
+      this.rival = this._savedRival();
+      this.editing = 0;
+      this.hideFoe = false;
+      this.forts = [null, null];
+      this.forts[0] = this._makeFort(0);
+      this.forts[1] = this._makeFort(1);
+      this._lostFort = false;
+      this.player = this.forts[0];
+      this.enemy = this.forts[1];
+      this.reports = [null, null];
+      this.view = new View(this.map);
       this.state = "blueprint";
       this.blend = 0;
       this.tr = 0;
@@ -40760,7 +42442,6 @@ ${rows(desc.cannons)}
       this.muted = false;
       this.focus = "field";
       this.resultTimer = -1;
-      this.report = null;
       this.spectate = null;
       this._replayGen = 0;
       this._bpView = null;
@@ -40797,7 +42478,7 @@ ${rows(desc.cannons)}
           this._replayGen++;
         }
       });
-      this.world = new World({ canvas: this.glCanvas, view: this.view });
+      this.world = new World({ canvas: this.glCanvas, view: this.view, map: this.map });
       this.structure = new StructureView(this.world);
       this.fx = new Fx(this.world);
       this.editor = new Editor({
@@ -40809,13 +42490,23 @@ ${rows(desc.cannons)}
         audio: this.audio,
         onChange: (info) => this.onBlueprintChanged(info)
       });
+      this.setup = new SetupUI({ root: this.uiRoot, box: this.hud.setupBox, actions: this._setupActions() });
+      this.mapEditor = new MapEditor({
+        canvas: this.bpCanvas,
+        view: this.view,
+        root: this.uiRoot,
+        onSave: (raw) => this.closeMapEditor(raw),
+        onCancel: () => this.closeMapEditor(null),
+        toast: (t, k) => this.hud.toast(t, k)
+      });
       this._bindInput();
       this._bindFortIO();
       this.resize();
-      this.view.fit(FIELD_BOUNDS, padFor("blueprint", this.view.w));
+      this.view.fit(this.view.fieldB, padFor("blueprint", this.view.w));
       this.setTool("wood");
       this.hud.setMode("blueprint");
-      this.onBlueprintChanged({ silent: true });
+      this.hud.setLimits(this.map);
+      this._applySeats();
       this.structure.setStressView(this.stressView);
       this.hud.setStress(this.stressView);
       this.hud.setMuted(this.muted);
@@ -40838,7 +42529,7 @@ ${rows(desc.cannons)}
         sim.shells.push({ id: 1, side: 0, cannon: 0, mount: 0, x: 12, y: 8, ox: 12, oy: 8, vx: 10, vy: 2, age: 0.2, alive: true });
         this.structure.build(sim);
         this.structure.setStressView(this.stressView);
-        const W = CFG.fieldW, wy = CFG.waterY;
+        const W = this.map.fieldW, wy = this.map.hasWater ? this.map.waterY : this.map.groundTop(this.map.fieldW / 2);
         const brk = (mat2, cause) => ({ type: "break", cause, side: 0, beam: 0, bpId: 0, mat: mat2, x1: 4, y1: 4, x2: 6, y2: 5, vx1: 0, vy1: 1, vx2: 1, vy2: 0 });
         const evs = [
           { type: "fire", side: 0, cannon: 0, x: 2, y: 6, angle: 0.5 },
@@ -40866,47 +42557,355 @@ ${rows(desc.cannons)}
       this.structure.clear();
       this.world.setBlend(0);
     }
-    // ------------------------------------------------------------ 存档
-    _loadSaved() {
+    // ------------------------------------------------------------ 地图
+    _loadCustomMaps() {
       try {
-        const raw = localStorage.getItem(SAVE_KEY);
-        if (!raw) return null;
-        const bp = Blueprint.fromJSON(JSON.parse(raw), "player");
-        this._droppedCannons = bp.dropIllegalCannons();
-        if (bp.validate() === null) return bp;
-        this._droppedCannons = 0;
-        return null;
+        const arr = JSON.parse(ls(MAPS_KEY) || "[]");
+        return Array.isArray(arr) ? arr.filter((m) => m && typeof m.id === "string" && !MAPS[m.id] && validateMap(m) === null) : [];
       } catch {
-        return null;
+        return [];
       }
     }
+    _saveCustomMaps() {
+      lsSet(MAPS_KEY, JSON.stringify(this.customMaps));
+    }
+    _rawMap(id) {
+      return MAPS[id] || this.customMaps.find((m) => m.id === id) || null;
+    }
+    /** 取一张地图；找不到或数据坏了就回到「海峡」 */
+    _openMap(id) {
+      try {
+        return getMap(this._rawMap(id) || MAPS.strait);
+      } catch {
+        return getMap("strait");
+      }
+    }
+    _mapList() {
+      return [
+        ...MAP_ORDER.map((id) => ({ id, name: MAPS[id].name, raw: MAPS[id], custom: false })),
+        ...this.customMaps.map((raw) => ({ id: raw.id, name: raw.name, raw, custom: true }))
+      ];
+    }
+    /** 换一张地图：存好手上的堡垒，换上这张图自己的那一套 */
+    setMap(id) {
+      if (this.state !== "blueprint") {
+        this.hud.toast("\u5148\u8FD4\u56DE\u84DD\u56FE\uFF0C\u518D\u6362\u5730\u56FE", "error");
+        return false;
+      }
+      this.editor.cancel();
+      this._saveNow();
+      this.map = this._openMap(id);
+      lsSet(MAP_KEY, this.map.id);
+      this.rival = this._savedRival();
+      this.editing = 0;
+      this._lostFort = false;
+      this.forts[0] = this._makeFort(0);
+      this.forts[1] = this._makeFort(1);
+      this.reports = [null, null];
+      this._showMap(this.map);
+      this.hud.setLimits(this.map);
+      this.focus = "field";
+      this.hud.setFocus("field");
+      this.view.fit(this.view.fieldB, padFor("blueprint", this.view.w));
+      this._bpView = null;
+      this._applySeats();
+      if (this._lostFort) {
+        const f = this._lostFort;
+        this._lostFort = false;
+        this.hud.toast(f.kept ? f.lost ? `\u5730\u56FE\u53D8\u4E86\uFF1A\u539F\u6765\u7684\u5821\u5792\u6709 ${f.lost} \u6839\u6746\u4EF6\u653E\u4E0D\u4E0B\uFF0C\u5DF2\u53BB\u6389\uFF0C\u5176\u4F59\u7167\u65E7` : "\u5730\u56FE\u53D8\u4E86\uFF1A\u539F\u6765\u7684\u5821\u5792\u5DF2\u7167\u539F\u6837\u642C\u8FC7\u6765" : "\u539F\u6765\u5B58\u5728\u8FD9\u5F20\u56FE\u4E0A\u7684\u5821\u5792\u5DF2\u7ECF\u653E\u4E0D\u4E0B\uFF08\u5730\u56FE\u6216\u89C4\u5219\u53D8\u4E86\uFF09\uFF0C\u6362\u6210\u4E86\u65B0\u7684\u84DD\u56FE", "info");
+      }
+      return true;
+    }
+    /** 让画面（取景、实景、特效）用这张地图。观战回放时可能和玩家手上的地图不是同一张 */
+    _showMap(M) {
+      this.view.setMap(M);
+      this.world.setMap(M);
+      this.fx.setMap(M);
+    }
+    // ------------------------------------------------------------ 座位：谁在左、谁在右、现在改哪一座
+    _savedRival() {
+      const k = ls(rivalKey(this.map.id));
+      if (k === "file" && !ls(fortKey(this.map.id, "file"))) return this._defaultRival();
+      if (k === "preset" && !hasPreset(this.map, "garrison")) return this._defaultRival();
+      return RIVALS.some((r) => r.kind === k) ? k : this._defaultRival();
+    }
+    _defaultRival() {
+      return hasPreset(this.map, "garrison") ? "preset" : "mirror";
+    }
+    /** 读存档里的堡垒。规则更新后不再合法的炮会被拆掉（等于退款）；其它不合法的存档直接丢弃 */
+    _readFort(seat) {
+      const tryLoad = (raw) => {
+        if (!raw) return null;
+        try {
+          const json = JSON.parse(raw);
+          const bp = Blueprint.fromJSON(json, seat ? "enemy" : "player", void 0, this.map);
+          const dropped = bp.dropIllegalCannons();
+          if (bp.validate() === null) {
+            if (dropped && seat === 0) this._droppedCannons = dropped;
+            return bp;
+          }
+          lsSet(fortKey(this.map.id, this._slot(seat)) + ".bak", raw);
+          const fix = this._salvage(json, seat);
+          this._lostFort = { kept: fix.kept, lost: fix.lost };
+          return fix.kept ? fix.bp : null;
+        } catch {
+          this._lostFort = { kept: 0, lost: 0 };
+          return null;
+        }
+      };
+      return tryLoad(ls(fortKey(this.map.id, this._slot(seat)))) || (seat === 0 && this.map.raw === MAPS.strait ? tryLoad(ls(SAVE_KEY)) : null);
+    }
+    /** 把一份存档里的杆件和火炮按坐标重新搭到当前地图上，放不下的丢掉。返回 { bp, kept, lost } */
+    _salvage(json, seat) {
+      const DEG8 = Math.PI / 180;
+      const bp = new Blueprint(seat ? "enemy" : "player", void 0, this.map);
+      const at = /* @__PURE__ */ new Map();
+      for (const [id, x, y, kind] of json.nodes || []) {
+        at.set(id, [x, y]);
+        if (kind === "core") bp.setCore(x, y);
+      }
+      const ends = /* @__PURE__ */ new Map();
+      let kept = 0, lost = 0;
+      for (const [id, a, b, mat2] of json.beams || []) {
+        const pa = at.get(a), pb = at.get(b);
+        const na = pa && bp.addNode(pa[0], pa[1]), nb = pb && bp.addNode(pb[0], pb[1]);
+        const r = na && nb && na.ok && nb.ok ? bp.addBeam(na.id, nb.id, mat2) : { ok: false };
+        if (r.ok) {
+          kept++;
+          ends.set(id, r.id);
+        } else {
+          lost++;
+          for (const n of [na, nb]) if (n && n.ok && !n.existed) bp._pruneNode(n.id);
+        }
+      }
+      for (const [, beam, deg] of json.cannons || []) if (ends.has(beam)) bp.addCannon(ends.get(beam), deg * DEG8);
+      return { bp, kept, lost };
+    }
+    /** 存档位：左边是 0；右边是玩家 2 自己搭的（1）还是导入的（file），各存各的 */
+    _slot(seat) {
+      return seat === 0 ? 0 : this.rival === "file" ? "file" : 1;
+    }
+    _makeFort(seat) {
+      const M = this.map;
+      if (seat === 0) return this._readFort(0) || presetFort(M, "starter", "player") || new Blueprint("player", void 0, M);
+      switch (this.rival) {
+        case "preset":
+          return presetFort(M, "garrison", "enemy") || new Blueprint("enemy", void 0, M);
+        case "mirror":
+          return this.forts[0].clone("enemy");
+        default:
+          return this._readFort(1) || new Blueprint("enemy", void 0, M);
+      }
+    }
+    /** 换对手 */
+    setRival(kind) {
+      if (this.state !== "blueprint") return false;
+      if (!RIVALS.some((r) => r.kind === kind)) return false;
+      if (kind === "preset" && !hasPreset(this.map, "garrison")) {
+        this.hud.toast("\u8FD9\u5F20\u56FE\u6CA1\u6709\u81EA\u5E26\u7684\u5BF9\u624B", "error");
+        return false;
+      }
+      if (kind === "file" && !ls(fortKey(this.map.id, "file"))) {
+        this.hud.toast("\u8FD8\u6CA1\u6709\u5BFC\u5165\u8FC7\u5821\u5792\uFF1A\u628A\u6587\u4EF6\u62D6\u5230\u7A97\u53E3\u53F3\u534A\u8FB9", "info");
+        return false;
+      }
+      this.editor.cancel();
+      this._saveNow();
+      this.rival = kind;
+      lsSet(rivalKey(this.map.id), kind);
+      this.editing = 0;
+      this.forts[1] = this._makeFort(1);
+      this.reports = [null, null];
+      this._applySeats();
+      return true;
+    }
+    /** 双人轮流搭建时，换另一位来搭 */
+    setEditing(seat) {
+      if (this.state !== "blueprint" || this.rival !== "human" || seat === this.editing) return;
+      this.editing = seat ? 1 : 0;
+      this._applySeats();
+      this.hud.toast(`\u73B0\u5728\u7531${SEAT_NAMES[this.editing]} \u642D\u5EFA${this.editing ? "\uFF08\u5F00\u6218\u540E\u5728\u53F3\u8FB9\uFF09" : ""}`, "info");
+    }
+    /** 座位、对手或地图变了之后，把编辑器和界面对齐 */
+    _applySeats() {
+      this.player = this.forts[0];
+      this.enemy = this.forts[1];
+      const two = this.rival === "human";
+      const e = this.editing;
+      const rivalName = (RIVALS.find((r) => r.kind === this.rival) || {}).name || "";
+      if (this.editor.player !== this.forts[e] || this.editor.enemy !== this.forts[1 - e]) this.editor.setForts(this.forts[e], this.forts[1 - e]);
+      else this.editor.invalidate();
+      this.editor.hideEnemy = two && this.hideFoe;
+      this.editor.labels = { me: two ? `${SEAT_NAMES[e]} \u7684\u5821\u5792` : "", foe: two ? `${SEAT_NAMES[1 - e]} \u7684\u5821\u5792` : this.rival === "preset" ? "\u654C\u65B9\u5821\u5792" : rivalName };
+      this.hud.setNames(two ? SEAT_NAMES : null);
+      this._showReport();
+      this.setup.setState({
+        map: { id: this.map.id, name: this.map.name },
+        maps: this._mapList(),
+        rival: this.rival,
+        rivals: RIVALS.map((r) => ({ ...r, ok: r.kind !== "preset" || hasPreset(this.map, "garrison") })),
+        editing: e,
+        hideFoe: this.hideFoe,
+        names: two ? SEAT_NAMES : ["\u6211\u65B9", "\u5BF9\u624B"]
+      });
+      this.onBlueprintChanged({ silent: true });
+    }
+    _setupActions() {
+      return {
+        pickMap: (id) => {
+          if (id !== this.map.id) this.setMap(id);
+        },
+        newMap: () => this.openMapEditor(blankMap()),
+        editMap: (id) => {
+          const raw = this._rawMap(id);
+          if (raw) this.openMapEditor(raw);
+        },
+        copyMap: (id) => {
+          const raw = this._rawMap(id);
+          if (raw) this.openMapEditor({ ...mapData(raw), id: "", name: `${raw.name} \u6539` });
+        },
+        deleteMap: (id) => this.deleteMap(id),
+        exportMap: (id) => {
+          const raw = this._rawMap(id);
+          if (raw) this._download(`map-${raw.name}.json`, JSON.stringify(mapData(raw), null, 2) + "\n", `\u5DF2\u5BFC\u51FA\u5730\u56FE\uFF1A${raw.name}`);
+        },
+        importMap: (o, name) => this.importMap(o, name),
+        rival: (kind) => this.setRival(kind),
+        editSeat: (seat) => this.setEditing(seat),
+        hideFoe: (on) => {
+          this.hideFoe = !!on;
+          this._applySeats();
+        },
+        exportFort: () => this._downloadFort(),
+        importFort: (seat, o, name) => {
+          if (!o) {
+            this.hud.toast(`${name} \u4E0D\u662F\u5408\u6CD5\u7684 JSON`, "error");
+            return false;
+          }
+          return this.setFort(seat ? "enemy" : "player", o, name);
+        },
+        // 把对手换成一座导入的堡垒（原来是玩家 2 的话，也换成导入的）
+        importRival: (o, name) => {
+          if (!o) {
+            this.hud.toast(`${name} \u4E0D\u662F\u5408\u6CD5\u7684 JSON`, "error");
+            return false;
+          }
+          return this.setFort("enemy", o, name, true);
+        }
+      };
+    }
+    // ------------------------------------------------------------ 自定义地图
+    openMapEditor(raw) {
+      if (this.state !== "blueprint") return;
+      this.editor.cancel();
+      this._saveNow();
+      this.editor.setEnabled(false);
+      this.state = "mapedit";
+      this.uiRoot.classList.add("mode-mapedit");
+      this.mapEditor.begin(raw);
+    }
+    /** 关掉地图编辑器。raw 是要保存的地图；取消时传 null */
+    closeMapEditor(raw) {
+      if (this.state !== "mapedit") return;
+      this.mapEditor.end();
+      this.uiRoot.classList.remove("mode-mapedit");
+      this.state = "blueprint";
+      this.editor.setEnabled(true);
+      this.view.setMap(this.map);
+      this.view.fit(this.view.fieldB, padFor("blueprint", this.view.w));
+      if (!raw) return;
+      const saved = { ...raw, id: raw.id && !MAPS[raw.id] ? raw.id : `custom-${Date.now().toString(36)}` };
+      const why = validateMap(saved);
+      if (why) {
+        this.hud.toast("\u5730\u56FE\u6CA1\u6709\u4FDD\u5B58\uFF1A" + why, "error");
+        return;
+      }
+      const i = this.customMaps.findIndex((m) => m.id === saved.id);
+      if (i >= 0) this.customMaps[i] = saved;
+      else this.customMaps.push(saved);
+      this._saveCustomMaps();
+      this.setMap(saved.id);
+      this.hud.toast(`\u5730\u56FE\u300C${saved.name}\u300D\u5DF2\u4FDD\u5B58`, "info");
+    }
+    deleteMap(id) {
+      const i = this.customMaps.findIndex((m) => m.id === id);
+      if (i < 0) return;
+      const name = this.customMaps[i].name;
+      this.customMaps.splice(i, 1);
+      this._saveCustomMaps();
+      for (const slot of [0, 1, "file"]) {
+        lsSet(fortKey(id, slot), null);
+        lsSet(fortKey(id, slot) + ".bak", null);
+      }
+      lsSet(rivalKey(id), null);
+      if (this.map.id === id) this.setMap("strait");
+      else this._applySeats();
+      this.hud.toast(`\u5DF2\u5220\u9664\u5730\u56FE\u300C${name}\u300D`, "info");
+    }
+    /** 导入一份地图数据（文件、控制台接口都走这里）。成功后直接换到这张图 */
+    importMap(o, name) {
+      if (this.state !== "blueprint") {
+        this.hud.toast("\u5148\u8FD4\u56DE\u84DD\u56FE\uFF0C\u518D\u5BFC\u5165\u5730\u56FE", "error");
+        return false;
+      }
+      if (!o) {
+        this.hud.toast(`${name || "\u8FD9\u4E2A\u6587\u4EF6"} \u4E0D\u662F\u5408\u6CD5\u7684 JSON`, "error");
+        return false;
+      }
+      const raw = { ...o, id: `custom-${Date.now().toString(36)}`, name: typeof o.name === "string" && o.name ? o.name.slice(0, 16) : (name || "\u5BFC\u5165\u7684\u5730\u56FE").slice(0, 16) };
+      const why = validateMap(raw);
+      if (why) {
+        this.hud.toast("\u5730\u56FE\u4E0D\u53EF\u7528\uFF1A" + why, "error");
+        this.audio.ui("error");
+        return false;
+      }
+      this.customMaps.push(raw);
+      this._saveCustomMaps();
+      this.setup.close();
+      this.setMap(raw.id);
+      this.hud.toast(`\u5DF2\u5BFC\u5165\u5730\u56FE\u300C${raw.name}\u300D`, "info");
+      return true;
+    }
+    // ------------------------------------------------------------ 存档
     _save() {
       if (this._saveTimer) return;
-      this._saveTimer = setTimeout(() => {
+      this._saveTimer = setTimeout(() => this._saveNow(), 250);
+    }
+    _saveNow() {
+      if (this._saveTimer) {
+        clearTimeout(this._saveTimer);
         this._saveTimer = 0;
-        try {
-          localStorage.setItem(SAVE_KEY, JSON.stringify(this.player.toJSON()));
-        } catch {
-        }
-      }, 250);
+      }
+      lsSet(fortKey(this.map.id, 0), JSON.stringify(this.forts[0].toJSON()));
+      if (this.rival === "human" || this.rival === "file") lsSet(fortKey(this.map.id, this._slot(1)), JSON.stringify(this.forts[1].toJSON()));
     }
     // ------------------------------------------------------------ 蓝图界面
     onBlueprintChanged(info = {}) {
-      const cost = this.player.cost();
-      this.hud.setBudget({ cost, budget: CFG.budget, breakdown: this.player.breakdown(), delta: info.delta || 0, silent: !!info.silent });
+      const bp = this.forts[this.editing];
+      if (this.rival === "mirror") {
+        this.forts[1].load(this.forts[0]);
+        this.editor.invalidate();
+      }
+      this.hud.setBudget({ cost: bp.cost(), budget: this.map.budget, breakdown: bp.breakdown(), delta: info.delta || 0, silent: !!info.silent });
       this.hud.setUndoState({ canUndo: this.editor.canUndo, canRedo: this.editor.canRedo });
       this._save();
     }
-    /** 「示例」按钮：在两座示例堡垒之间轮换（可撤销） */
+    /** 「示例」按钮：在这张图的几座示例堡垒之间轮换（可撤销） */
     loadExample() {
       if (this.state !== "blueprint") return;
       const examples = [
-        { make: makeStarterFort, name: "\u8D77\u624B\u5821\u5792" },
-        { make: makeReferenceFort, name: "\u53C2\u8003\u5821\u5792\uFF08\u9884\u7B97\u5185\u80FD\u6253\u8D62\u9ED8\u8BA4\u654C\u4EBA\u7684\u4E00\u79CD\u642D\u6CD5\uFF09" }
-      ];
+        ["starter", "\u8D77\u624B\u5821\u5792"],
+        ["reference", "\u53C2\u8003\u5821\u5792\uFF08\u9884\u7B97\u5185\u80FD\u6253\u8D62\u5B88\u519B\u7684\u4E00\u79CD\u642D\u6CD5\uFF09"],
+        ["garrison", "\u5B88\u519B\u7684\u5821\u5792\uFF08\u770B\u770B\u5BF9\u624B\u662F\u600E\u4E48\u642D\u7684\uFF09"]
+      ].filter(([k]) => hasPreset(this.map, k));
+      if (!examples.length) {
+        this.hud.toast("\u81EA\u5B9A\u4E49\u5730\u56FE\u6CA1\u6709\u793A\u4F8B\u5821\u5792", "info");
+        return;
+      }
       this._example = ((this._example || 0) + 1) % examples.length;
-      const ex = examples[this._example];
-      this.editor.loadBlueprint(ex.make());
+      const [kind, name] = examples[this._example];
+      const ex = { name };
+      this.editor.loadBlueprint(presetFort(this.map, kind, this.editing ? "enemy" : "player"));
       this._clearReport();
       this.hud.toast(`\u5DF2\u8F7D\u5165\u793A\u4F8B\uFF1A${ex.name}`, "info");
     }
@@ -40915,52 +42914,76 @@ ${rows(desc.cannons)}
      * 载入一座堡垒描述。side: 'player'（左）或 'enemy'（右）。成功返回 true。
      * 描述格式见 src/ai/api.js 的 loadFort：坐标式、命名式或存档格式都行。
      */
-    setFort(side, desc, label) {
-      const enemy = side === "enemy" || side === "B" || side === "right";
-      const who = enemy ? "\u654C\u65B9" : "\u6211\u65B9";
+    setFort(side, desc, label, asRival = false) {
+      const seat = side === "enemy" || side === "B" || side === "right" || side === 1 ? 1 : 0;
+      const swap = asRival && this.rival === "human";
+      const two = this.rival === "human" && !swap;
+      const who = two ? SEAT_NAMES[seat] + " " : seat ? "\u5BF9\u624B" : "\u6211\u65B9";
       if (this.state !== "blueprint") {
         this.hud.toast("\u5148\u8FD4\u56DE\u84DD\u56FE\uFF0C\u518D\u8F7D\u5165\u5821\u5792", "error");
         return false;
       }
       let bp;
       try {
-        bp = loadFort(desc, enemy ? "enemy" : "player");
+        bp = loadFort(desc, seat ? "enemy" : "player", void 0, this.map);
       } catch (e) {
-        this.hud.toast(`${who}\u5821\u5792\u4E0D\u5408\u89C4\u5219\uFF1A${e && e.message ? e.message : e}`, "error");
+        this.hud.toast(`${who}\u7684\u5821\u5792\u4E0D\u5408\u89C4\u5219\uFF1A${e && e.message ? e.message : e}`, "error");
         this.audio.ui("error");
         return false;
       }
       this.editor.cancel();
-      if (enemy) {
-        this.enemy.load(bp);
-        this.editor.invalidate();
-      } else {
-        this.editor.loadBlueprint(bp);
+      if (swap) {
+        this._saveNow();
+        this.rival = "mirror";
+        this.editing = 0;
+        this.forts[1] = new Blueprint("enemy", void 0, this.map);
       }
-      this._clearReport();
+      if (seat === this.editing) {
+        this.editor.loadBlueprint(bp);
+      } else {
+        this.forts[seat].load(bp);
+        if (seat === 1 && !two) {
+          this.rival = "file";
+          lsSet(rivalKey(this.map.id), "file");
+          this._saveNow();
+          this._applySeats();
+        } else {
+          this.editor.invalidate();
+          this._save();
+        }
+      }
+      this.reports[seat] = null;
+      this._showReport();
       const cost = bp.cost();
       const name = label || desc && desc.name || "";
-      const over = cost > CFG.budget;
-      this.hud.toast(`\u5DF2\u8F7D\u5165${who}\u5821\u5792${name ? "\u300C" + name + "\u300D" : ""}\uFF1A$${cost.toLocaleString()}${over ? "\uFF08\u8D85\u51FA\u9884\u7B97\uFF09" : ""}`, over ? "error" : "info");
+      const over = cost > this.map.budget;
+      this.hud.toast(`\u5DF2\u8F7D\u5165${who}\u7684\u5821\u5792${name ? "\u300C" + name + "\u300D" : ""}\uFF1A$${cost.toLocaleString()}${over ? "\uFF08\u8D85\u51FA\u9884\u7B97\uFF09" : ""}`, over ? "error" : "info");
       return true;
     }
     resetEnemy() {
-      return this.setFort("enemy", makeEnemyFort(), "\u9ED8\u8BA4\u654C\u4EBA");
+      return this.setRival(this._defaultRival());
     }
-    _downloadFort() {
+    _download(filename, text, done) {
       try {
-        const text = formatFort(exportFort(this.player, "my-fort"));
         const link = document.createElement("a");
         link.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
-        link.download = "fort.json";
+        link.download = filename;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
         setTimeout(() => URL.revokeObjectURL(link.href), 2e3);
-        this.hud.toast("\u5DF2\u5BFC\u51FA\u6211\u65B9\u5821\u5792\uFF1Afort.json", "info");
+        this.hud.toast(done, "info");
       } catch {
         this.hud.toast("\u5BFC\u51FA\u5931\u8D25", "error");
       }
+    }
+    _downloadFort() {
+      const two = this.rival === "human";
+      this._download(
+        "fort.json",
+        formatFort(exportFort(this.forts[this.editing], two ? `player-${this.editing + 1}` : "my-fort")),
+        `\u5DF2\u5BFC\u51FA${two ? SEAT_NAMES[this.editing] + " " : "\u6211\u65B9"}\u7684\u5821\u5792\uFF1Afort.json\uFF08\u5730\u56FE\uFF1A${this.map.name}\uFF09`
+      );
     }
     _bindFortIO() {
       const veil = document.createElement("div");
@@ -41012,11 +43035,25 @@ ${rows(desc.cannons)}
         });
       });
       window.trussfort = {
-        rules,
-        // rules() 当前规则；rules('v1') 旧版本
+        rules: (version, map) => rules(version, map || this.map),
+        // rules() 当前规则和当前地图；rules('v1') 旧版本
         loadFort: (side, desc) => this.setFort(side, desc),
-        exportFort: (side) => exportFort(side === "enemy" ? this.enemy : this.player),
+        exportFort: (side) => exportFort(side === "enemy" ? this.forts[1] : this.forts[0]),
         resetEnemy: () => this.resetEnemy(),
+        /** 地图：maps() 列出全部；map() 当前这张的数据；setMap(名字) 换图；importMap(数据) 导入一张自定义地图并换过去 */
+        maps: () => this._mapList().map((m) => ({ id: m.id, name: m.name, custom: m.custom })),
+        map: () => mapData(this.map),
+        setMap: (id) => this.setMap(id),
+        importMap: (data) => this.importMap(data),
+        /** 对手：rival() 看当前是谁；rival('preset' | 'mirror' | 'human' | 'file') 换；edit(0 | 1) 双人时换人搭 */
+        rival: (kind) => {
+          if (kind) this.setRival(kind);
+          return this.rival;
+        },
+        edit: (seat) => {
+          this.setEditing(seat);
+          return this.editing;
+        },
         start: () => this.startBattle(),
         back: () => this.backToBlueprint(),
         /** 对战回放：open() 打开列表；play(比赛目录名, 第几轮, 第几局) 直接看一局，返回 Promise<是否开始> */
@@ -41042,6 +43079,11 @@ ${rows(desc.cannons)}
         else this.openArena();
       }
       const a = q.get("a"), b = q.get("b");
+      const wantMap = q.get("map") || (a || b ? "strait" : null);
+      if (wantMap && wantMap !== this.map.id) {
+        if (this._rawMap(wantMap)) this.setMap(wantMap);
+        else this.hud.toast(`\u6CA1\u6709\u540D\u53EB ${wantMap} \u7684\u5730\u56FE`, "error");
+      }
       if (a || b) {
         if (!/^https?:$/.test(location.protocol)) {
           this.hud.toast("\u53CC\u51FB\u6253\u5F00\u65F6\u4E0D\u80FD\u6309\u7F51\u5740\u8BFB\u6587\u4EF6\uFF1A\u76F4\u63A5\u628A JSON \u6587\u4EF6\u62D6\u8FDB\u7A97\u53E3", "error");
@@ -41077,9 +43119,14 @@ ${rows(desc.cannons)}
       });
     }
     _clearReport() {
-      this.report = null;
-      this.editor.setBattleReport(null);
-      this.hud.setReport(null);
+      this.reports[this.editing] = null;
+      this._showReport();
+    }
+    /** 把正在编辑的这一座的上一战损毁标记交给编辑器 */
+    _showReport() {
+      const rep = this.reports[this.editing];
+      this.editor.setBattleReport(rep);
+      this.hud.setReport(rep && rep.broken.size ? { count: rep.broken.size } : null);
     }
     setTool(tool) {
       if (this.state !== "blueprint") return;
@@ -41089,7 +43136,7 @@ ${rows(desc.cannons)}
     toggleFocus() {
       this.focus = this.focus === "field" ? "build" : "field";
       const pad = padFor(this.state === "blueprint" ? "blueprint" : "battle", this.view.w);
-      this.view.animateTo(this.view.fitTarget(this.focus === "field" ? FIELD_BOUNDS : BUILD_BOUNDS, pad), 0.5);
+      this.view.animateTo(this.view.fitTarget(this.focus === "field" ? this.view.fieldB : this.view.buildB, pad), 0.5);
       this.hud.setFocus(this.focus);
     }
     // ------------------------------------------------------------ 开战 / 返回
@@ -41099,19 +43146,24 @@ ${rows(desc.cannons)}
       this._replayGen++;
       this.editor.cancel();
       const spec = this.spectate;
-      const cost = spec ? 0 : this.player.cost();
-      if (cost > CFG.budget) {
-        this.hud.toast(`\u8D85\u51FA\u9884\u7B97 $${(cost - CFG.budget).toLocaleString()}\uFF0C\u5148\u62C6\u6389\u4E00\u4E9B\u518D\u5F00\u6218`, "error");
-        this.audio.ui("error");
-        return false;
+      if (!spec) {
+        const two = this.rival === "human";
+        for (const seat of [0, 1]) {
+          const over = this.forts[seat].cost() - this.map.budget;
+          if (over <= 0) continue;
+          const who = two ? SEAT_NAMES[seat] + " " : seat ? "\u5BF9\u624B\u7684\u5821\u5792" : "";
+          this.hud.toast(`${who}\u8D85\u51FA\u9884\u7B97 $${over.toLocaleString()}\uFF0C\u5148\u62C6\u6389\u4E00\u4E9B\u518D\u5F00\u6218`, "error");
+          this.audio.ui("error");
+          return false;
+        }
       }
       this.audio.unlock();
       this.editor.setEnabled(false);
-      this.sim = spec ? new Sim(spec.a, spec.b, { seed: spec.seed, rules: spec.rules }) : new Sim(this.player, this.enemy, { seed: CFG.seed ?? 20261115 });
+      this.sim = spec ? new Sim(spec.a, spec.b, { seed: spec.seed, rules: spec.rules, map: spec.map }) : new Sim(this.forts[0], this.forts[1], { seed: CFG.seed ?? 20261115, map: this.map });
       this.acc = 0;
       this.paused = false;
       this.resultTimer = -1;
-      this._collect = { broken: /* @__PURE__ */ new Map(), peak: /* @__PURE__ */ new Map(), order: 0 };
+      this._collect = [0, 1].map(() => ({ broken: /* @__PURE__ */ new Map(), peak: /* @__PURE__ */ new Map(), order: 0 }));
       this.structure.build(this.sim);
       this.structure.setStressView(this.stressView);
       this.fx.clear();
@@ -41120,7 +43172,7 @@ ${rows(desc.cannons)}
         this._bpFocus = this.focus;
         this.focus = "field";
         this.hud.setFocus("field");
-        this.view.animateTo(this.view.fitTarget(FIELD_BOUNDS, padFor("battle", this.view.w)), T_IN);
+        this.view.animateTo(this.view.fitTarget(this.view.fieldB, padFor("battle", this.view.w)), T_IN);
       }
       this.state = "toBattle";
       this.tr = 0;
@@ -41134,18 +43186,16 @@ ${rows(desc.cannons)}
       if (this.state !== "battle" && this.state !== "toBattle") return;
       this._replayGen++;
       const spec = this.spectate;
-      if (!spec) this.report = this._makeReport();
+      if (!spec) this.reports = [this._makeReport(0), this.rival === "human" ? this._makeReport(1) : null];
       this.state = "toBlueprint";
       this.tr = 1 - unsmooth(this.blend);
       this.hud.hideResult();
       this.hud.setMode("blueprint");
-      if (!spec) {
-        this.editor.setBattleReport(this.report);
-        this.hud.setReport(this.report && this.report.broken.size ? { count: this.report.broken.size } : null);
-      }
+      if (!spec) this._showReport();
       this.focus = this._bpFocus || "field";
       this.hud.setFocus(this.focus);
-      const back = this._bpView || this.view.fitTarget(this.focus === "field" ? FIELD_BOUNDS : BUILD_BOUNDS, padFor("blueprint", this.view.w));
+      if (spec) this.view.setMap(this.map);
+      const back = this._bpView || this.view.fitTarget(this.focus === "field" ? this.view.fieldB : this.view.buildB, padFor("blueprint", this.view.w));
       this.view.animateTo(back, T_OUT);
       this.audio.ui("back");
       this.audio.stopBattle();
@@ -41153,7 +43203,8 @@ ${rows(desc.cannons)}
         this.arena.open();
         return;
       }
-      if (this.report && this.report.winner === "enemy" && this.report.broken.size) {
+      const mine = this.reports[0];
+      if (this.rival !== "human" && mine && mine.lost && mine.broken.size) {
         let seen = false;
         try {
           seen = !!localStorage.getItem(TIP_KEY);
@@ -41201,7 +43252,8 @@ ${rows(desc.cannons)}
         const [fl, fr] = await Promise.all([get(round.forts[g.left]), get(round.forts[1 - g.left])]);
         if (gen !== this._replayGen || this.state !== from || this.sim !== fromSim) return false;
         const rules2 = match.rules || "v1";
-        const a = loadFort(fl, "player", rules2), b = loadFort(fr, "enemy", rules2);
+        const M = getMap(match.map || "strait");
+        const a = loadFort(fl, "player", rules2, M), b = loadFort(fr, "enemy", rules2, M);
         const names = [shortName(match.players[g.left]), shortName(match.players[1 - g.left])];
         const caption = `\u7B2C ${round.round} \u8F6E \xB7 \u7B2C ${gi + 1} \u5C40`;
         const record = { winner: g.winner == null ? null : g.winner === g.left ? "player" : "enemy", seconds: g.seconds };
@@ -41210,7 +43262,8 @@ ${rows(desc.cannons)}
           this._teardownBattle();
           this.state = "blueprint";
         }
-        this.spectate = { a, b, seed: g.seed, rules: rules2, names, caption, record, match, ri, gi };
+        this.spectate = { a, b, seed: g.seed, rules: rules2, map: M, names, caption, record, match, ri, gi };
+        this._showMap(M);
         this.hud.setSpectate({ names, caption, hasNext: !!this._nextGame(match, ri, gi) });
         this.arena.close();
         if (!this.startBattle(inBattle)) {
@@ -41236,6 +43289,7 @@ ${rows(desc.cannons)}
     _endSpectate() {
       this.spectate = null;
       this.hud.setSpectate(null);
+      this._showMap(this.map);
     }
     /** 退回蓝图的过渡结束（或被提前收尾）：丢掉这场模拟，交还编辑器 */
     _finishBack() {
@@ -41267,9 +43321,12 @@ ${rows(desc.cannons)}
       this.audio.stopBattle();
       this.resultTimer = -1;
     }
-    _makeReport() {
-      if (!this._collect) return null;
-      return { broken: this._collect.broken, peak: this._collect.peak, winner: this.sim ? this.sim.winner : null };
+    /** 某个座位这一战的损毁记录。lost：这个座位是不是输了 */
+    _makeReport(seat) {
+      const c = this._collect && this._collect[seat];
+      if (!c) return null;
+      const w = this.sim ? this.sim.winner : null;
+      return { broken: c.broken, peak: c.peak, winner: w, lost: w === (seat ? "player" : "enemy") };
     }
     setSpeed(s) {
       this.speed = s;
@@ -41300,11 +43357,13 @@ ${rows(desc.cannons)}
         this.fx.onEvent(e, sim);
         this.audio.onEvent(e, sim);
         this.hud.onEvent(e, sim);
-        if (e.type === "break" && e.side === 0 && e.cause !== "sunk" && !this._collect.broken.has(e.bpId)) {
-          const info = { order: ++this._collect.order, cause: e.cause, t: sim.time };
-          for (const id of e.bpIds || [e.bpId]) this._collect.broken.set(id, info);
+        if (e.type === "break" && e.cause !== "sunk" && !this._collect[e.side].broken.has(e.bpId)) {
+          const col2 = this._collect[e.side];
+          const info = { order: ++col2.order, cause: e.cause, t: sim.time };
+          for (const id of e.bpIds || [e.bpId]) col2.broken.set(id, info);
         } else if (e.type === "fightStart" && !this.spectate) {
-          const stuck = sim.cannons.filter((c) => c.side === 0 && c.alive && c.grounded).length;
+          const mine = this.rival === "human" ? [0, 1] : [0];
+          const stuck = sim.cannons.filter((c) => mine.includes(c.side) && c.alive && c.grounded).length;
           if (stuck) this.hud.toast(`\u6709 ${stuck} \u95E8\u70AE\u7684\u70AE\u5EA7\u8D34\u5728\u5730\u9762\u4E0A\uFF0C\u5F00\u4E0D\u4E86\u706B`, "error");
         } else if (e.type === "end") {
           this.resultTimer = RESULT_DELAY;
@@ -41313,11 +43372,11 @@ ${rows(desc.cannons)}
       evs.length = 0;
     }
     _trackPeaks(sim) {
-      const peak = this._collect.peak;
       const beams = sim.beams;
       for (let i = 0; i < beams.length; i++) {
         const b = beams[i];
-        if (b.side !== 0 || !b.alive) continue;
+        if (!b.alive) continue;
+        const peak = this._collect[b.side].peak;
         for (const id of b.bpIds) {
           if (b.stressVis > (peak.get(id) || 0)) peak.set(id, b.stressVis);
         }
@@ -41378,7 +43437,7 @@ ${rows(desc.cannons)}
                 hpMax: sim.cores[0].hpMax,
                 note: off ? `\u8FD9\u4E2A\u6D4F\u89C8\u5668\u7B97\u51FA\u7684\u7ED3\u679C\u548C\u6BD4\u8D5B\u8BB0\u5F55\u4E0D\u540C\uFF0C\u8BB0\u5F55\u662F ${recWho}\u3001${rec.seconds} \u79D2` : ""
               });
-              this.audio.ui(this.spectate || sim.winner === "player" ? "win" : sim.winner === "enemy" ? "lose" : "draw");
+              this.audio.ui(this.spectate || this.rival === "human" || sim.winner === "player" ? "win" : sim.winner === "enemy" ? "lose" : "draw");
             } else {
               this.resultTimer = 1e-6;
             }
@@ -41394,7 +43453,10 @@ ${rows(desc.cannons)}
       const bpAlpha = hideBp ? 0 : 1 - smooth3((this.blend - 0.08) / 0.6);
       this.bpCanvas.style.opacity = bpAlpha.toFixed(3);
       this.bpCanvas.style.visibility = bpAlpha > 1e-3 ? "visible" : "hidden";
-      if (bpAlpha > 1e-3) this.editor.draw(dt);
+      if (bpAlpha > 1e-3) {
+        if (this.state === "mapedit") this.mapEditor.draw(dt);
+        else this.editor.draw(dt);
+      }
       requestAnimationFrame((t) => this.frame(t));
     }
     // ------------------------------------------------------------ 输入
@@ -41404,9 +43466,10 @@ ${rows(desc.cannons)}
       this.view.resize(w, h);
       this.world.resize(w, h, dpr);
       this.editor.resize(w, h, dpr);
-      if (this._sized) {
+      this.mapEditor.resize(w, h, dpr);
+      if (this._sized && this.state !== "mapedit") {
         const battle = this.state === "battle" || this.state === "toBattle";
-        const b = battle || this.focus === "field" ? FIELD_BOUNDS : BUILD_BOUNDS;
+        const b = battle || this.focus === "field" ? this.view.fieldB : this.view.buildB;
         this.view.fit(b, padFor(battle ? "battle" : "blueprint", w));
         if (battle) this._bpView = null;
       }
@@ -41447,6 +43510,20 @@ ${rows(desc.cannons)}
           }
           return;
         }
+        if (this.setup.isOpen) {
+          if (e.code === "Escape") {
+            e.preventDefault();
+            this.setup.close();
+          }
+          return;
+        }
+        if (this.state === "mapedit") {
+          if (e.code === "Escape") {
+            e.preventDefault();
+            this.closeMapEditor(null);
+          }
+          return;
+        }
         if (this.state === "blueprint") {
           if (mod && e.code === "KeyZ") {
             e.preventDefault();
@@ -41472,6 +43549,11 @@ ${rows(desc.cannons)}
           if (e.code === "Enter") {
             e.preventDefault();
             this.startBattle();
+            return;
+          }
+          if (e.code === "Tab" && this.rival === "human") {
+            e.preventDefault();
+            this.setEditing(1 - this.editing);
             return;
           }
           if (e.code === "Escape") {

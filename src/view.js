@@ -4,25 +4,45 @@
 //   ppm    : 每米多少 CSS 像素
 //   w, h   : 视口尺寸（CSS 像素）
 
-import { CFG } from './config.js';
+import { getMap } from './map.js';
 
-// 全景取景范围（世界坐标）
-export const FIELD_BOUNDS = { xMin: -11, xMax: CFG.fieldW + 11, yMin: -8.5, yMax: 19 };
-// 我方建造区取景范围
-export const BUILD_BOUNDS = { xMin: -10, xMax: 11, yMin: -7, yMax: 13 };
+/** 全景取景范围（世界坐标）：两座堡垒的建造区、中间的地形，水面以下留一截 */
+export function fieldBounds(M) {
+  const B = M.build;
+  let lo = Infinity, hi = M.gMax;
+  for (const [x, y] of M.worldGround) if (x >= B.xMin - 3 && x <= M.fieldW - B.xMin + 3) lo = Math.min(lo, y);
+  lo = Math.min(lo, M.groundIn(B.xMin - 3));
+  const yMin = M.hasWater ? M.waterY - 2.5 : Math.min(lo, B.yMin) - 3;
+  return { xMin: B.xMin - 3, xMax: M.fieldW - B.xMin + 3, yMin, yMax: Math.max(B.yMax + 8, hi + 6) };
+}
+/** 我方建造区取景范围 */
+export function buildBounds(M) {
+  const B = M.build;
+  return { xMin: B.xMin - 2, xMax: B.xMax + 3, yMin: B.yMin - 3, yMax: B.yMax + 2 };
+}
 
 export class View {
-  constructor() {
-    this.cx = CFG.fieldW / 2; this.cy = 5; this.ppm = 24;
+  constructor(map) {
     this.w = 1280; this.h = 720;
     this.minPpm = 10; this.maxPpm = 110;
     // 平滑动画目标（animateTo 设置，update 推进）
     this._anim = null;
+    this.setMap(map);
+    this.cx = this.map.fieldW / 2; this.cy = 5; this.ppm = 24;
+  }
+
+  /** 换地图：取景范围跟着地图走 */
+  setMap(map) {
+    this.map = getMap(map);
+    this.fieldB = fieldBounds(this.map);
+    this.buildB = buildBounds(this.map);
+    this.resize(this.w, this.h);
   }
 
   resize(w, h) {
     this.w = w; this.h = h;
-    this.minPpm = Math.min(w / (FIELD_BOUNDS.xMax - FIELD_BOUNDS.xMin + 30), h / (FIELD_BOUNDS.yMax - FIELD_BOUNDS.yMin + 14));
+    const F = this.fieldB;
+    this.minPpm = Math.min(w / (F.xMax - F.xMin + 30), h / (F.yMax - F.yMin + 14));
   }
 
   // ---- 坐标换算 ----
@@ -48,8 +68,9 @@ export class View {
     this._clamp();
   }
   _clamp() {
-    this.cx = Math.min(FIELD_BOUNDS.xMax + 4, Math.max(FIELD_BOUNDS.xMin - 4, this.cx));
-    this.cy = Math.min(FIELD_BOUNDS.yMax + 6, Math.max(FIELD_BOUNDS.yMin - 2, this.cy));
+    const F = this.fieldB;
+    this.cx = Math.min(F.xMax + 4, Math.max(F.xMin - 4, this.cx));
+    this.cy = Math.min(F.yMax + 6, Math.max(F.yMin - 2, this.cy));
   }
 
   /** 让给定世界范围刚好落进视口（留出边距，单位像素）后的目标值 */

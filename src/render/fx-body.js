@@ -1,6 +1,6 @@
 // 纯视觉的刚体碎块：断杆的两半、炮的残骸。
 // 只在 xy 平面里平动 + 绕 z 转动（外加绕自身长轴的翻滚，纯装饰）。
-// 粗糙的世界碰撞：崖顶 y=0（x<0 或 x>fieldW）弹一次后停住，约 4 秒后缩小消失；落水溅一朵水花后下沉消失。
+// 粗糙的世界碰撞：落到地面（高度由 env.groundAt(x) 给）弹一次后停住，约 4 秒后缩小消失；落水溅一朵水花后下沉消失。
 
 import * as THREE from 'three';
 
@@ -25,7 +25,7 @@ export function makeBody() {
 
 /**
  * 推进一个刚体。返回 false 表示它已经消失。
- * env: { fieldW, waterAt(x), splash(x, y, power) }
+ * env: { waterAt(x), groundAt(x), splash(x, y, power) }
  */
 export function stepBody(b, dt, env) {
   if (dt <= 0) return true;
@@ -46,9 +46,9 @@ export function stepBody(b, dt, env) {
   b.ang += b.w * dt; b.roll += b.wroll * dt;
 
   const ext = Math.abs(Math.sin(b.ang)) * b.hx + Math.abs(Math.cos(b.ang)) * b.hy;
-  const overGround = b.x < 0 || b.x > env.fieldW;
-  if (overGround && b.y - ext < 0 && prevLow >= -0.08) {
-    b.y = ext;
+  const gy = env.groundAt(b.x);
+  if (b.y - ext < gy && prevLow >= gy - 0.08) {
+    b.y = gy + ext;
     if (b.landT < 0) b.landT = b.age;
     if (b.bounces === 0 && b.vy < -1.5) {
       // 一次带阻尼的弹跳

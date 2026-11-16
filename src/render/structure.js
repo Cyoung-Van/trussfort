@@ -177,7 +177,7 @@ export class StructureView {
         if (!sim.fixed[i]) continue;
         // 崖顶上的锚座底板朝下；崖壁上的朝向崖壁（左崖 -x，右崖 +x）
         let rot = 0;
-        if (sim.y[i] < -0.01) rot = sim.x[i] < CFG.fieldW * 0.5 ? -Math.PI / 2 : Math.PI / 2;
+        if (sim.M.surfaceKind(sim.x[i], sim.y[i]) === 'wall') rot = sim.M.inside(sim.x[i] - 0.2, sim.y[i]) ? -Math.PI / 2 : Math.PI / 2;
         writeRotZ(a, j * 16, sim.x[i], sim.y[i], 0, Math.cos(rot), Math.sin(rot), 1);
         j++;
       }

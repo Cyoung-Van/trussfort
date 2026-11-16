@@ -6,6 +6,8 @@ import * as THREE from 'three';
 import { THEME } from '../theme.js';
 import { computeRig, applyRig, newRig } from './world-camera.js';
 import { buildTerrain, buildBackdrop, waterlineFace } from './world-terrain.js';
+import { buildMapTerrain } from './world-terrain-map.js';
+import { getMap, MAPS } from '../map.js';
 import { Water, waveHeight } from './world-water.js';
 import { GeoBuilder, hash, col, shade } from './world-geo.js';
 
@@ -23,7 +25,7 @@ function cssHex(hex) { return '#' + hex.toString(16).padStart(6, '0'); }
 function smooth(t) { t = t < 0 ? 0 : t > 1 ? 1 : t; return t * t * (3 - 2 * t); }
 
 export class World {
-  constructor({ canvas, view }) {
+  constructor({ canvas, view, map }) {
     this.view = view;
     this.canvas = canvas;
     this.blend = 0;
@@ -51,14 +53,78 @@ export class World {
 
     this._buildSky();
     this._buildLights();
-    this._buildLand();
-    this.water = new Water([waterlineFace(0), waterlineFace(1)]);
-    scene.add(this.water.group);
     this._buildClouds();
-    this._buildFlags();
+    this._landMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.92, metalness: 0 });
+    this._backMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1, metalness: 0 });
+    this._mapObjs = [];
+    this.water = null;
+    this.flags = [];
+    this.setMap(map);
 
     scene.add(this.groups.structure, this.groups.fx);
     this.update(0, 0);
+  }
+
+  /**
+   * 换地图：重建地形、水面、旗子，阴影范围跟着场地宽度走。
+   * 「海峡」用手调的悬崖（world-terrain.js），其它地图按地表折线生成（world-terrain-map.js）。
+   */
+  setMap(map) {
+    const M = getMap(map);
+    if (this.map === M) return;
+    this.map = M;
+    const scene = this.scene;
+    for (const o of this._mapObjs) { scene.remove(o); if (o.geometry) o.geometry.dispose(); }
+    this._mapObjs.length = 0;
+    for (const f of this.flags) { scene.remove(f.mesh); f.mesh.geometry.dispose(); f.mesh.material.dispose(); }
+    if (this.water) { scene.remove(this.water.group); this.water.dispose(); this.water = null; }
+
+    const classic = M.raw === MAPS.strait;
+    const t = classic ? buildTerrain() : buildMapTerrain(M);
+    const land = new THREE.Mesh(t.geometry, this._landMat);
+    land.name = 'terrain';
+    land.castShadow = true;
+    land.receiveShadow = true;
+    const back = new THREE.Mesh(buildBackdrop(M.hasWater ? M.waterY : t.baseY - 1.5), this._backMat);
+    back.name = 'backdrop';
+    scene.add(land, back);
+    this._mapObjs.push(land, back);
+    this._flagMounts = t.flagMounts;
+    this._buildFlags();
+
+    if (M.hasWater) {
+      const shores = classic ? [{ dir: 1, line: waterlineFace(0) }, { dir: -1, line: waterlineFace(1) }] : t.shore;
+      this.water = new Water(shores, { waterY: M.waterY, bedY: Math.min(M.gMin, M.waterY - 4), midX: M.fieldW / 2 });
+      scene.add(this.water.group);
+    }
+    this._fitShadow();
+  }
+
+  /** 阴影相机紧贴「战场 + 两侧近景」这个盒子 */
+  _fitShadow() {
+    const M = this.map, sun = this.sun;
+    const W = M.fieldW;
+    const T = new THREE.Vector3(W / 2, 6, -4);
+    const dir = new THREE.Vector3(-22, 42, 28).normalize();
+    sun.position.copy(T).addScaledVector(dir, 90);
+    sun.target.position.copy(T);
+    const look = new THREE.Matrix4().lookAt(sun.position, T, new THREE.Vector3(0, 1, 0));
+    const inv = look.clone().transpose();
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, d0 = Infinity, d1 = -Infinity;
+    const v = new THREE.Vector3();
+    const lo = M.hasWater ? Math.min(-13, M.gMin) : Math.min(M.gMin, M.build.yMin) - 2;
+    const hi = Math.max(26, M.build.yMax + 14, M.gMax + 8);
+    for (const bx of [-18, W + 18]) for (const by of [lo, hi]) for (const bz of [-16, 8]) {
+      v.set(bx, by, bz).sub(sun.position).applyMatrix4(inv);
+      x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x);
+      y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
+      d0 = Math.min(d0, -v.z); d1 = Math.max(d1, -v.z);
+    }
+    const cam = sun.shadow.camera;
+    cam.left = x0; cam.right = x1; cam.bottom = y0; cam.top = y1;
+    cam.near = Math.max(0.5, d0 - 4); cam.far = d1 + 4;
+    cam.updateProjectionMatrix();
+    sun.target.updateMatrixWorld();
   }
 
   // ------------------------------------------------------------------ 构建
@@ -88,48 +154,15 @@ export class World {
     this.scene.add(hemi);
 
     const sun = new THREE.DirectionalLight(w.sun, LIGHT.sun);
-    // 左上前方；阴影相机紧贴「战场 + 两崖近景」这个盒子
-    const T = new THREE.Vector3(15, 6, -4);
-    const dir = new THREE.Vector3(-22, 42, 28).normalize();
-    sun.position.copy(T).addScaledVector(dir, 90);
-    sun.target.position.copy(T);
+    // 左上前方；位置和阴影范围在 _fitShadow 里按地图定
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.bias = -0.0004;
     sun.shadow.normalBias = 0.02;
     sun.shadow.radius = 2.5;
-    const look = new THREE.Matrix4().lookAt(sun.position, T, new THREE.Vector3(0, 1, 0));
-    const inv = look.clone().transpose();
-    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, d0 = Infinity, d1 = -Infinity;
-    const v = new THREE.Vector3();
-    for (const bx of [-18, 48]) for (const by of [-13, 26]) for (const bz of [-16, 8]) {
-      v.set(bx, by, bz).sub(sun.position).applyMatrix4(inv);
-      x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x);
-      y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
-      d0 = Math.min(d0, -v.z); d1 = Math.max(d1, -v.z);
-    }
-    const cam = sun.shadow.camera;
-    cam.left = x0; cam.right = x1; cam.bottom = y0; cam.top = y1;
-    cam.near = Math.max(0.5, d0 - 4); cam.far = d1 + 4;
-    cam.updateProjectionMatrix();
     this.scene.add(sun, sun.target);
     this.sun = sun;
     this.hemi = hemi;
-  }
-
-  _buildLand() {
-    const { geometry, flagMounts } = buildTerrain();
-    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.92, metalness: 0 });
-    const land = new THREE.Mesh(geometry, mat);
-    land.name = 'terrain';
-    land.castShadow = true;
-    land.receiveShadow = true;
-    this.scene.add(land);
-    this._flagMounts = flagMounts;
-
-    const back = new THREE.Mesh(buildBackdrop(), new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1, metalness: 0 }));
-    back.name = 'backdrop';
-    this.scene.add(back);
   }
 
   _buildClouds() {
@@ -200,7 +233,8 @@ export class World {
     this._shake = Math.min(1.2, this._shake + Math.min(1, strength));
   }
 
-  waterLevelAt(x, z = 0) { return waveHeight(x, z, this.time); }
+  /** 水面高度；这张图没有水时是负无穷 */
+  waterLevelAt(x, z = 0) { return this.water ? waveHeight(x, z, this.time) : -Infinity; }
 
   update(dt, time) {
     dt = dt > 0 ? dt : 0;
@@ -225,7 +259,7 @@ export class World {
     fog.far = rig.D + FOG_FAR;
 
     // 水面、泡沫
-    this.water.update(t);
+    if (this.water) this.water.update(t);
 
     // 云
     const cl = this.clouds;

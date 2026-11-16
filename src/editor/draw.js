@@ -3,6 +3,7 @@
 
 import { CFG, CANNON, CORE } from '../config.js';
 import { THEME } from '../theme.js';
+import { getMap } from '../map.js';
 
 const BP = THEME.bp;
 
@@ -44,9 +45,11 @@ export class Painter {
   constructor(ctx) {
     this.ctx = ctx;
     this.view = null; this.dpr = 1; this.w = 1; this.h = 1; this.time = 0;
+    this.map = getMap();
     this._vig = null; this._vigKey = '';
   }
-  frame(view, dpr, w, h, time) { this.view = view; this.dpr = dpr; this.w = w; this.h = h; this.time = time; }
+  /** map：当前地图（地形、水面、建造区都按它画） */
+  frame(view, dpr, w, h, time, map) { this.view = view; this.dpr = dpr; this.w = w; this.h = h; this.time = time; if (map) this.map = map; }
 
   sx(x) { return this.view.sx(x); }
   sy(y) { return this.view.sy(y); }
@@ -104,7 +107,7 @@ export class Painter {
 
     // 建造区边上的米数标注
     if (v.ppm >= 11) {
-      const B = CFG.build;
+      const B = this.map.build;
       c.font = `10px ${MONO}`;
       c.fillStyle = BP.inkFaint;
       c.textBaseline = 'bottom'; c.textAlign = 'center';
@@ -117,47 +120,65 @@ export class Painter {
   }
 
   // ---------- 地形剖面 ----------
+  /** 地表折线的屏幕坐标（两头伸出画面） */
+  _groundPts(align) {
+    const v = this.view, w = this.w, h = this.h;
+    const out = [];
+    for (const [x, y] of this.map.worldGround) {
+      let sx = v.sx(x), sy = v.sy(y);
+      sx = sx < -40 ? -40 : sx > w + 40 ? w + 40 : sx;      // 两头的点在千米之外，夹到画面边上
+      sy = sy < -4 * h ? -4 * h : sy > 5 * h ? 5 * h : sy;
+      out.push(align ? [this.al(sx, 2), this.al(sy, 2)] : [sx, sy]);
+    }
+    return out;
+  }
   _terrainPath() {
-    const c = this.ctx, v = this.view, W = CFG.fieldW, BIG = 400;
+    const c = this.ctx, h = this.h;
+    const pts = this._groundPts(false);
     c.beginPath();
-    c.moveTo(v.sx(-BIG), v.sy(0));
-    c.lineTo(v.sx(0), v.sy(0));
-    c.lineTo(v.sx(0), v.sy(CFG.seabedY));
-    c.lineTo(v.sx(W), v.sy(CFG.seabedY));
-    c.lineTo(v.sx(W), v.sy(0));
-    c.lineTo(v.sx(W + BIG), v.sy(0));
-    c.lineTo(v.sx(W + BIG), v.sy(-BIG));
-    c.lineTo(v.sx(-BIG), v.sy(-BIG));
+    pts.forEach(([x, y], i) => { if (i === 0) c.moveTo(x, y); else c.lineTo(x, y); });
+    c.lineTo(pts[pts.length - 1][0], 6 * h);
+    c.lineTo(pts[0][0], 6 * h);
     c.closePath();
   }
 
   water() {
-    const c = this.ctx, v = this.view, W = CFG.fieldW, t = this.time;
-    const xa = v.sx(0), xb = v.sx(W);
-    const yb = v.sy(CFG.seabedY);
-    const n = Math.max(8, Math.ceil((xb - xa) / 10));
-    const wave = (x) => CFG.waterY + 0.07 * Math.sin(x * 1.25 + t * 1.6) + 0.045 * Math.sin(x * 2.9 - t * 1.15);
-    c.beginPath();
-    for (let i = 0; i <= n; i++) {
-      const x = (W * i) / n;
-      const px = v.sx(x), py = v.sy(wave(x));
-      if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+    const M = this.map;
+    if (!M.hasWater) return;
+    const c = this.ctx, v = this.view, t = this.time, h = this.h;
+    const wave = (x) => M.waterY + 0.07 * Math.sin(x * 1.25 + t * 1.6) + 0.045 * Math.sin(x * 2.9 - t * 1.15);
+    let widest = null;
+    for (const [x0, x1] of M.waterSpans) {
+      // 只画落在画面里的那一段
+      const a = Math.max(x0, v.wx(-20)), b = Math.min(x1, v.wx(this.w + 20));
+      if (b <= a) continue;
+      if (!widest || x1 - x0 > widest[1] - widest[0]) widest = [x0, x1];
+      const n = Math.max(8, Math.ceil((v.sx(b) - v.sx(a)) / 10));
+      const line = () => {
+        for (let i = 0; i <= n; i++) {
+          const x = a + ((b - a) * i) / n;
+          const px = v.sx(x), py = v.sy(wave(x));
+          if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+        }
+      };
+      // 水体：上边是波浪线，下边沿着水底的地形走回来
+      c.beginPath(); line();
+      const bed = M.worldGround.filter(([x]) => x >= a - 1e-6 && x <= b + 1e-6);
+      c.lineTo(v.sx(b), v.sy(Math.min(M.waterY, M.groundIn(b))));
+      for (let i = bed.length - 1; i >= 0; i--) c.lineTo(v.sx(bed[i][0]), Math.min(h + 10, v.sy(Math.min(M.waterY, bed[i][1]))));
+      c.lineTo(v.sx(a), v.sy(Math.min(M.waterY, M.groundIn(a))));
+      c.closePath();
+      c.fillStyle = BP.water; c.fill();
+      c.beginPath(); line();
+      c.strokeStyle = BP.waterLine; c.lineWidth = 1.5; c.lineJoin = 'round'; c.stroke();
     }
-    c.lineTo(xb, yb); c.lineTo(xa, yb); c.closePath();
-    c.fillStyle = BP.water; c.fill();
-    // 波浪线
-    c.beginPath();
-    for (let i = 0; i <= n; i++) {
-      const x = (W * i) / n;
-      const px = v.sx(x), py = v.sy(wave(x));
-      if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
-    }
-    c.strokeStyle = BP.waterLine; c.lineWidth = 1.5; c.lineJoin = 'round'; c.stroke();
-    // 剖面图里的水面符号：三道渐短的短线
-    const cx = v.sx(W * 0.5), y0 = v.sy(CFG.waterY);
+    if (!widest) return;
+    // 剖面图里的水面符号：三道渐短的短线，画在最宽的那片水中间
+    const cx = v.sx((widest[0] + widest[1]) / 2), y0 = v.sy(M.waterY);
+    const k0 = Math.min(1.4, v.ppm / 24, (v.sx(widest[1]) - v.sx(widest[0])) / 60);
     c.beginPath();
     for (let k = 0; k < 3; k++) {
-      const half = (22 - k * 7) * Math.min(1.4, v.ppm / 24);
+      const half = (22 - k * 7) * k0;
       const yy = this.al(y0 + (k + 1) * 5 * Math.min(1.4, v.ppm / 24));
       c.moveTo(cx - half, yy); c.lineTo(cx + half, yy);
     }
@@ -178,25 +199,37 @@ export class Painter {
     for (let k = phase - h; k < w + h; k += s) { c.moveTo(k, 0); c.lineTo(k - h, h); }
     c.strokeStyle = BP.terrainHatch; c.lineWidth = 1; c.stroke();
     c.restore();
-    // 顶面和崖壁的实线
-    const W = CFG.fieldW;
+    // 地表的实线
     c.beginPath();
-    c.moveTo(-10, this.al(v.sy(0), 2)); c.lineTo(this.al(v.sx(0), 2), this.al(v.sy(0), 2)); c.lineTo(this.al(v.sx(0), 2), v.sy(CFG.seabedY));
-    c.lineTo(this.al(v.sx(W), 2), v.sy(CFG.seabedY));
-    c.lineTo(this.al(v.sx(W), 2), this.al(v.sy(0), 2)); c.lineTo(w + 10, this.al(v.sy(0), 2));
+    this._groundPts(true).forEach(([x, y], i) => { if (i === 0) c.moveTo(x, y); else c.lineTo(x, y); });
     c.strokeStyle = BP.ink; c.lineWidth = 2; c.lineJoin = 'miter'; c.stroke();
   }
 
   // ---------- 建造区 ----------
-  zone(mirror, alpha, label) {
-    const c = this.ctx, v = this.view, B = CFG.build, W = CFG.fieldW;
+  /** 建造区的轮廓：矩形里露在地面以上的那部分（屏幕坐标的点列） */
+  _zonePts(mirror) {
+    const M = this.map, v = this.view, B = M.build, W = M.fieldW;
     const X = (x) => v.sx(mirror ? W - x : x);
-    const pts = [
-      [X(B.xMin), v.sy(0)], [X(B.xMin), v.sy(B.yMax)], [X(B.xMax), v.sy(B.yMax)],
-      [X(B.xMax), v.sy(B.yMin)], [X(0), v.sy(B.yMin)], [X(0), v.sy(0)],
-    ].map(([x, y]) => [this.al(x), this.al(y)]);
+    // 上边和两条侧边照矩形走；下边沿着地表走（地表低于矩形下沿的地方走矩形下沿）
+    const floor = (x) => Math.max(B.yMin, Math.min(B.yMax, M.groundTop(x)));
+    const xs = [B.xMin];
+    for (const [x] of M.localGround) if (x > B.xMin + 1e-6 && x < B.xMax - 1e-6 && x > xs[xs.length - 1] + 1e-6) xs.push(x);
+    xs.push(B.xMax);
+    const pts = [[X(B.xMin), v.sy(B.yMax)], [X(B.xMax), v.sy(B.yMax)]];
+    for (let i = xs.length - 1; i >= 0; i--) {
+      const x = xs[i];
+      // 崖壁处地表有高低两个值：从右往左走，先到低的一侧，再到高的一侧
+      const lo = Math.max(B.yMin, Math.min(B.yMax, M.groundIn(x))), hi = floor(x);
+      pts.push([X(x), v.sy(lo)]);
+      if (hi - lo > 1e-6) pts.push([X(x), v.sy(hi)]);
+    }
+    return pts.map(([x, y]) => [this.al(x), this.al(y)]);
+  }
+  zone(mirror, alpha, label) {
+    const c = this.ctx, v = this.view, B = this.map.build, W = this.map.fieldW;
+    const X = (x) => v.sx(mirror ? W - x : x);
     c.beginPath();
-    roundPoly(c, pts, 7);
+    roundPoly(c, this._zonePts(mirror), 7);
     c.globalAlpha = alpha;
     c.setLineDash([7, 5]); c.lineDashOffset = 0;
     c.strokeStyle = BP.zone; c.lineWidth = 1; c.stroke();
@@ -204,6 +237,25 @@ export class Painter {
     if (label) {
       c.font = `600 11px ${FONT}`; c.fillStyle = BP.zone; c.textAlign = 'left'; c.textBaseline = 'top';
       c.fillText(label, X(B.xMin) + 8, v.sy(B.yMax) + 7);
+    }
+    c.globalAlpha = 1;
+  }
+  /** 核心可以放的范围：一圈点线，拖动核心时才亮起来 */
+  coreZone(mirror, alpha, color, label) {
+    const c = this.ctx, v = this.view, Z = this.map.coreZone, W = this.map.fieldW;
+    if (!Z || alpha <= 0) return;
+    const xa = v.sx(mirror ? W - Z.xMax : Z.xMin), xb = v.sx(mirror ? W - Z.xMin : Z.xMax);
+    const ya = v.sy(Z.yMax), yb = v.sy(Z.yMin);
+    const pad = Math.min(14, 0.5 * v.ppm);
+    c.globalAlpha = alpha;
+    c.beginPath();
+    roundRect(c, this.al(xa - pad), this.al(ya - pad), xb - xa + pad * 2, yb - ya + pad * 2, 8);
+    c.setLineDash([2, 5]); c.lineDashOffset = 0; c.lineCap = 'round';
+    c.strokeStyle = color; c.lineWidth = 1.5; c.stroke();
+    c.setLineDash([]); c.lineCap = 'butt';
+    if (label) {
+      c.font = `600 11px ${FONT}`; c.fillStyle = color; c.textAlign = 'right'; c.textBaseline = 'bottom';
+      c.fillText(label, xb + pad - 6, ya - pad - 4);
     }
     c.globalAlpha = 1;
   }

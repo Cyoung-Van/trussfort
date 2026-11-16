@@ -64,6 +64,8 @@ export class Editor {
     this.hover = null;               // { type: 'cannon'|'node'|'beam', id }
     this.report = null;
     this._reportT0 = 0;
+    this.hideEnemy = false;          // 双人轮流设计时遮住对方的堡垒
+    this.labels = { me: '', foe: '敌方堡垒' };   // 画在堡垒上方的名字；me 为空就不画
 
     // 动画
     this.pops = new Map();           // 'b'+id / 'n'+id / 'c'+id → t0
@@ -139,6 +141,20 @@ export class Editor {
 
   /** 蓝图被外部改过（比如换了一座敌方堡垒）：让弹道预览等缓存失效 */
   invalidate() { this._bump(); this._repCache = null; }
+
+  /**
+   * 换一对蓝图来编辑（换地图、换边时用）：player 是正在编辑的那座，enemy 是画在对面的那座。
+   * 撤销记录属于被换下的那座蓝图，一并清空。
+   */
+  setForts(player, enemy) {
+    this.cancel();
+    this.player = player; this.enemy = enemy;
+    this.undoStack.length = 0; this.redoStack.length = 0;
+    this.pops.clear(); this.dying.length = 0; this.floats.length = 0;
+    this.hover = null; this.report = null; this._traj.clear();
+    this.invalidate();
+  }
+  get map() { return this.player.map; }
 
   setEnabled(on) {
     on = !!on;
@@ -537,7 +553,7 @@ export class Editor {
     if (tool === 'move') {
       const n = this.pickNode(x, y);
       if (n) {
-        if (n.kind !== 'free') { this._reject(n.kind === 'core' ? '核心不能移动' : '锚点不能移动', x, y); return; }
+        if (n.kind === 'anchor' || (n.kind === 'core' && !this.player.rules.coreZone)) { this._reject(n.kind === 'core' ? '核心不能移动' : '锚点不能移动', x, y); return; }
         this.drag = {
           ...base, kind: 'move', node: n.id, snap: this.player.toJSON(), ox: n.x, oy: n.y, changed: false, reason: null,
         };
@@ -819,7 +835,7 @@ export class Editor {
     } else if (h.type === 'node') {
       const n = bp.nodes.get(h.id);
       if (n) {
-        if (n.kind === 'core') info = { text: '核心 · 需要结构托住', color: BP.player };
+        if (n.kind === 'core') info = { text: bp.rules.coreZone ? (tool === 'move' ? '核心 · 拖到范围里的任意位置' : '核心 · 需要结构托住（用「移动」可以挪）') : '核心 · 需要结构托住', color: BP.player };
         else if (n.kind === 'anchor') info = { text: tool === 'move' ? '锚点不能移动' : '锚点', color: tool === 'move' ? BP.invalid : BP.anchor };
         else info = { text: `节点 · ${bp.beamsOf(n.id).length} 根杆件`, color: BP.highlight };
       }
@@ -855,7 +871,7 @@ export class Editor {
     const e = this._traj.get(c.id);
     if (e && e.rev === this.rev && e.angle === c.angle) return e.res;
     let res = null;
-    try { res = predictShot(this.player, c, this.enemy); } catch { res = null; }
+    try { res = predictShot(this.player, c, this.hideEnemy ? null : this.enemy); } catch { res = null; }
     this._traj.set(c.id, { rev: this.rev, angle: c.angle, res });
     if (this._traj.size > 16) {
       for (const id of this._traj.keys()) if (!this.player.cannons.has(id)) this._traj.delete(id);
@@ -871,7 +887,7 @@ export class Editor {
     const p = this.p, v = this.view;
     const t = this.time;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    p.frame(v, this.dpr, this.w, this.h, t);
+    p.frame(v, this.dpr, this.w, this.h, t, this.player.map);
     this._computeHover();
 
     p.paper();
@@ -880,8 +896,16 @@ export class Editor {
     p.terrain();
     p.zone(false, 1, '建造区');
     p.zone(true, 0.4, null);
+    if (this.player.rules.coreZone) {
+      // 核心范围：平时很淡，选了「移动」工具或正拖着核心时亮起来
+      const d = this.drag;
+      const dragging = d && d.kind === 'move' && this.player.nodes.get(d.node)?.kind === 'core';
+      const hot = dragging || (this._tool === 'move' && this.enabled);
+      p.coreZone(false, hot ? 0.95 : 0.3, BP.player, hot ? '核心范围' : null);
+      if (this.hideEnemy) p.coreZone(true, 0.5, BP.enemy, null);
+    }
 
-    this._drawEnemy();
+    if (this.hideEnemy) this._drawHiddenEnemy(); else this._drawEnemy();
 
     // 所有火炮的弹道（弱）
     const active = this._activeCannon();
@@ -937,8 +961,20 @@ export class Editor {
     return k >= 1 || k < 0 ? 0 : 1 - k;
   }
 
+  /** 对方的堡垒被遮住时：只画对面的锚点和一句说明 */
+  _drawHiddenEnemy() {
+    const p = this.p, v = this.view, M = this.map, W = M.fieldW;
+    const r = this._nodeR();
+    for (const [x, y] of M.anchors) p.anchor(v.sx(W - x), v.sy(y), Math.max(7, r * 2.2), BP.enemy, M.surfaceKind(x, y) === 'wall' ? 'right' : 'down', 0.5);
+    // 说明写在对方核心范围的上方
+    const Z = M.coreZone || M.build;
+    const cx = v.sx(W - (Z.xMin + Z.xMax) / 2), cy = v.sy(Z.yMax) - Math.min(14, 0.5 * v.ppm) - 22;
+    p.label(cx, cy, this.labels.foe, BP.enemy, 12, 'center', 'bottom', 0.9, 700);
+    p.label(cx, cy + 2, '开战前看不到 · 核心在虚线框里', BP.enemyDim, 11, 'center', 'top', 1, 600);
+  }
+
   _drawEnemy() {
-    const p = this.p, v = this.view, bp = this.enemy, W = CFG.fieldW;
+    const p = this.p, v = this.view, bp = this.enemy, M = this.map, W = M.fieldW;
     if (!bp) return;
     const A = 0.62;
     const X = (x) => v.sx(W - x);
@@ -954,7 +990,7 @@ export class Editor {
     const r = this._nodeR();
     for (const n of bp.nodes.values()) {
       const sx = X(n.x), sy = v.sy(n.y);
-      if (n.kind === 'anchor') p.anchor(sx, sy, Math.max(7, r * 2.2), BP.enemy, n.y < -1e-6 ? 'right' : 'down', A);
+      if (n.kind === 'anchor') p.anchor(sx, sy, Math.max(7, r * 2.2), BP.enemy, M.surfaceKind(n.x, n.y) === 'wall' ? 'right' : 'down', A);
       else if (n.kind === 'free') p.node(sx, sy, r, BP.enemy, BP.paper, A);
       maxY = Math.max(maxY, n.y); minX = Math.min(minX, W - n.x); maxX = Math.max(maxX, W - n.x);
     }
@@ -962,13 +998,13 @@ export class Editor {
     if (core) p.core(X(core.x), v.sy(core.y), BP.enemy, v.ppm, '核心', 0.85);
     if (maxY > -Infinity) {
       const cx = v.sx((minX + maxX) / 2), cy = v.sy(maxY) - 22;
-      p.label(cx, cy, '敌方堡垒', BP.enemy, 12, 'center', 'bottom', 0.9, 700);
+      p.label(cx, cy, this.labels.foe, BP.enemy, 12, 'center', 'bottom', 0.9, 700);
       p.label(cx, cy + 2, money(bp.cost()), BP.enemyDim, 11, 'center', 'top', 1, 600);
     }
   }
 
   _mirrorPose(q) {
-    const W = CFG.fieldW;
+    const W = this.map.fieldW;
     return { px: W - q.px, py: q.py, mx: W - q.mx, my: q.my, angle: Math.PI - q.angle, beamAngle: Math.PI - q.beamAngle };
   }
 
@@ -1009,7 +1045,7 @@ export class Editor {
     const r = this._nodeR();
     for (const n of bp.nodes.values()) {
       const sx = v.sx(n.x), sy = v.sy(n.y);
-      if (n.kind === 'anchor') p.anchor(sx, sy, Math.max(7, r * 2.2), BP.anchor, n.y < -1e-6 ? 'left' : 'down');
+      if (n.kind === 'anchor') p.anchor(sx, sy, Math.max(7, r * 2.2), BP.anchor, bp.map.surfaceKind(n.x, n.y) === 'wall' ? 'left' : 'down');
       else if (n.kind === 'free') {
         const s = this._popScale('n' + n.id);
         p.node(sx, sy, r * s, BP.ink);
@@ -1017,6 +1053,11 @@ export class Editor {
     }
     const core = bp.coreNode();
     if (core) p.core(v.sx(core.x), v.sy(core.y), BP.player, v.ppm, '核心', 1);
+    // 双人轮流搭建时写明这是谁的堡垒
+    if (this.labels.me) {
+      const B = bp.map.build;
+      p.label(v.sx(B.xMin) + 8, v.sy(B.yMax) + 24, this.labels.me, BP.player, 12, 'left', 'top', 0.95, 700);
+    }
   }
 
   // ---------- 战报 ----------
@@ -1204,7 +1245,7 @@ export class Editor {
     if (t.valid) {
       text = `+${money(t.price)} · ${t.len.toFixed(1)} m`;
       chipCol = BP.highlight;
-      if (bp.cost() + t.price > CFG.budget) { text += ' · 超预算'; chipCol = BP.invalid; }
+      if (bp.cost() + t.price > bp.map.budget) { text += ' · 超预算'; chipCol = BP.invalid; }
     } else { text = t.reason; chipCol = BP.invalid; }
     p.chip(this.pointer.sx + sh, this.pointer.sy, text, chipCol);
   }

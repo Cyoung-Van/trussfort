@@ -4,41 +4,23 @@
 
 import { CFG, MATERIALS, CANNON } from '../config.js';
 import { getRules } from '../rules.js';
+import { getMap } from '../map.js';
 
 const EPS = 1e-6;
 const DEG = Math.PI / 180;
-
-export function insideCliffLocal(x, y) { return x < -EPS && y < -EPS; }
-/** 这个点是不是贴在地形表面上（崖顶面 y=0、x<=0，或崖壁 x=0、y<=0） */
-export function onGroundLocal(x, y) { return (Math.abs(y) < 1e-4 && x < 1e-4) || (Math.abs(x) < 1e-4 && y < 1e-4); }
-
-// 线段是否穿过山体内部（开区域 x<0 且 y<0）。精确解：先求线段落在 x<0 一侧的参数区间，再看这段里 y 的最小值
-function segCrossesCliff(x1, y1, x2, y2) {
-  let t0 = 0, t1 = 1;
-  const dx = x2 - x1, dy = y2 - y1;
-  if (Math.abs(dx) < 1e-12) { if (!(x1 < -EPS)) return false; }
-  else {
-    const tc = (-EPS - x1) / dx;         // x(t) = -EPS 处
-    if (dx > 0) t1 = Math.min(t1, tc); else t0 = Math.max(t0, tc);
-    if (t0 >= t1) return false;
-  }
-  const ya = y1 + dy * t0, yb = y1 + dy * t1;
-  // 端点恰在边界上不算穿过，所以用区间中点再确认一次
-  if (Math.min(ya, yb) >= -EPS) return false;
-  const tm = (t0 + t1) / 2;
-  const lo = ya < yb ? t0 : t1;
-  const ts = lo + (tm - lo) * 1e-6;       // 紧贴最低端的内点
-  return insideCliffLocal(x1 + dx * ts, y1 + dy * ts) || insideCliffLocal(x1 + dx * tm, y1 + dy * tm);
-}
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const hasMat = (m) => typeof m === 'string' && Object.prototype.hasOwnProperty.call(MATERIALS, m);
 
 export class Blueprint {
-  /** @param rules 规则版本号或规则对象，不传就是当前版本（见 rules.js）。决定炮座规则和计价方式 */
-  constructor(side = 'player', rules) {
+  /**
+   * @param rules 规则版本号或规则对象，不传就是当前版本（见 rules.js）。决定炮座规则和计价方式
+   * @param map   地图名字或地图数据，不传就是默认地图（见 map.js）。决定地形、锚点、建造范围和核心范围
+   */
+  constructor(side = 'player', rules, map) {
     this.side = side;
     this.rules = getRules(rules);
+    this.map = getMap(map);
     this.nodes = new Map();   // id → {id, x, y, kind: 'free' | 'anchor' | 'core'}
     this.beams = new Map();   // id → {id, a, b, mat}
     this.cannons = new Map(); // id → {id, beam, angle}（弧度，本地坐标，0 = 水平朝敌方）
@@ -50,8 +32,8 @@ export class Blueprint {
   reset() {
     this.nodes.clear(); this.beams.clear(); this.cannons.clear();
     this._next = 1;
-    for (const [x, y] of CFG.anchors) this._putNode(x, y, 'anchor');
-    this._putNode(CFG.corePos[0], CFG.corePos[1], 'core');
+    for (const [x, y] of this.map.anchors) this._putNode(x, y, 'anchor');
+    this._putNode(this.map.core[0], this.map.core[1], 'core');
   }
 
   _putNode(x, y, kind) {
@@ -166,9 +148,23 @@ export class Blueprint {
   /** 返回 null 表示可放置，否则返回原因（给玩家看的中文短语） */
   checkNodePos(x, y) {
     if (!isNum(x) || !isNum(y)) return '坐标无效';
-    const B = CFG.build;
+    const B = this.map.build;
     if (x < B.xMin - EPS || x > B.xMax + EPS || y < B.yMin - EPS || y > B.yMax + EPS) return '超出建造区';
-    if (insideCliffLocal(x, y)) return '不能建在山体里';
+    if (this.map.inside(x, y)) return '不能建在山体里';
+    return null;
+  }
+  /** 核心能不能放在这里。规则不允许挪核心时，只有地图的默认位置合法。返回 null 或原因 */
+  checkCorePos(x, y) {
+    if (!isNum(x) || !isNum(y)) return '坐标无效';
+    const M = this.map;
+    if (!this.rules.coreZone) return Math.abs(x - M.core[0]) < 1e-6 && Math.abs(y - M.core[1]) < 1e-6 ? null : '这套规则下核心不能移动';
+    const g = CFG.grid;
+    if (Math.abs(x / g - Math.round(x / g)) > 1e-6 || Math.abs(y / g - Math.round(y / g)) > 1e-6) return '核心要放在网格点上';
+    const Z = M.coreZone;
+    if (x < Z.xMin - EPS || x > Z.xMax + EPS || y < Z.yMin - EPS || y > Z.yMax + EPS) return '超出核心范围';
+    if (M.inside(x, y)) return '核心不能放在山体里';
+    if (M.onSurface(x, y)) return '核心不能贴着地面';
+    if (M.hasWater && y <= M.waterY + EPS) return '核心不能放在水面以下';
     return null;
   }
   /** 检查两点之间能否用该材料连杆（不看是否已有节点）。返回 null 或原因 */
@@ -179,7 +175,7 @@ export class Blueprint {
     const len = Math.hypot(x2 - x1, y2 - y1);
     if (len < 0.5) return '太短';
     if (len > m.maxLen + 1e-4) return `${m.name}最长 ${m.maxLen} 米`;
-    if (segCrossesCliff(x1, y1, x2, y2)) return '不能穿过山体';
+    if (this.map.segCrosses(x1, y1, x2, y2)) return '不能穿过山体';
     return null;
   }
   _checkCannonBeam(mat, x1, y1, x2, y2) {
@@ -194,7 +190,7 @@ export class Blueprint {
   _checkCannonEnds(ka, x1, y1, kb, x2, y2) {
     const R = this.rules;
     if (!R.anchorMounts && (ka === 'anchor' || kb === 'anchor')) return '炮座不能接在锚点上';
-    if (!R.groundMounts && (onGroundLocal(x1, y1) || onGroundLocal(x2, y2))) return '炮座不能贴着地面';
+    if (!R.groundMounts && (this.map.onSurface(x1, y1) || this.map.onSurface(x2, y2))) return '炮座不能贴着地面';
     return null;
   }
 
@@ -203,7 +199,7 @@ export class Blueprint {
     const bm = this.beams.get(beamId);
     if (!bm) return '杆件不存在';
     if (this.cannonOn(beamId)) return '这根杆上已经有火炮';
-    if (!ignoreLimit && this.cannons.size >= CFG.maxCannons) return `最多 ${CFG.maxCannons} 门火炮`;
+    if (!ignoreLimit && this.cannons.size >= this.map.maxCannons) return `最多 ${this.map.maxCannons} 门火炮`;
     const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
     return this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
   }
@@ -261,13 +257,14 @@ export class Blueprint {
     return { ok: true };
   }
 
-  /** 拖动节点。任何相连杆件超长 / 穿山 / 炮座失效都会拒绝 */
+  /** 拖动节点。任何相连杆件超长 / 穿山 / 炮座失效都会拒绝。核心只能在地图给的核心范围里挪（规则允许时） */
   moveNode(id, x, y) {
     const n = this.nodes.get(id);
     if (!n) return { ok: false, reason: '节点不存在' };
-    if (n.kind !== 'free') return { ok: false, reason: n.kind === 'core' ? '核心不能移动' : '锚点不能移动' };
-    if (Math.abs(n.x - x) < 1e-6 && Math.abs(n.y - y) < 1e-6) return { ok: true };
-    const why = this.checkNodePos(x, y);
+    if (n.kind === 'anchor') return { ok: false, reason: '锚点不能移动' };
+    if (Math.abs(n.x - x) < 1e-6 && Math.abs(n.y - y) < 1e-6) return { ok: true };   // 原地不动总是可以的（旧规则下带着 core 字段的堡垒描述也能读）
+    if (n.kind === 'core' && !this.rules.coreZone) return { ok: false, reason: '核心不能移动' };
+    const why = n.kind === 'core' ? this.checkCorePos(x, y) : this.checkNodePos(x, y);
     if (why) return { ok: false, reason: why };
     const hit = this.nodeAt(x, y);
     if (hit && hit.id !== id) return { ok: false, reason: '那里已经有节点' };
@@ -296,6 +293,9 @@ export class Blueprint {
     return { ok: true };
   }
 
+  /** 把核心放到 (x, y)。和拖动核心节点是一回事 */
+  setCore(x, y) { return this.moveNode(this.coreNode().id, x, y); }
+
   setBeamMat(id, mat) {
     const bm = this.beams.get(id);
     if (!bm) return { ok: false, reason: '杆件不存在' };
@@ -314,7 +314,7 @@ export class Blueprint {
     const bm = this.beams.get(beamId);
     if (!bm) return { ok: false, reason: '杆件不存在' };
     if (this.cannonOn(beamId)) return { ok: false, reason: '这根杆上已经有火炮' };
-    if (this.cannons.size >= CFG.maxCannons) return { ok: false, reason: `最多 ${CFG.maxCannons} 门火炮` };
+    if (this.cannons.size >= this.map.maxCannons) return { ok: false, reason: `最多 ${this.map.maxCannons} 门火炮` };
     const a = this.nodes.get(bm.a), b = this.nodes.get(bm.b);
     const why = this._checkCannonBeam(bm.mat, a.x, a.y, b.x, b.y) || this._checkCannonEnds(a.kind, a.x, a.y, b.kind, b.x, b.y);
     if (why) return { ok: false, reason: why };
@@ -366,8 +366,8 @@ export class Blueprint {
       cannons: [...this.cannons.values()].map(c => [c.id, c.beam, +(c.angle / DEG).toFixed(3)]),
     };
   }
-  static fromJSON(o, side = 'player', rules) {
-    const bp = new Blueprint(side, rules);
+  static fromJSON(o, side = 'player', rules, map) {
+    const bp = new Blueprint(side, rules, map);
     bp.nodes.clear(); bp.beams.clear(); bp.cannons.clear();
     for (const [id, x, y, kind] of o.nodes) bp.nodes.set(id, { id, x, y, kind });
     for (const [id, a, b, mat] of o.beams) bp.beams.set(id, { id, a, b, mat });
@@ -375,10 +375,10 @@ export class Blueprint {
     bp._next = o.next;
     return bp;
   }
-  clone(side = this.side) { return Blueprint.fromJSON(this.toJSON(), side, this.rules); }
+  clone(side = this.side) { return Blueprint.fromJSON(this.toJSON(), side, this.rules, this.map); }
 
   /**
-   * 完整性检查（读取存档后用）：锚点和核心齐全且在原位、节点不重叠且位置合法、
+   * 完整性检查（读取存档后用）：锚点齐全且在原位、核心在允许的位置、节点不重叠且位置合法、
    * 杆件和火炮都满足建造规则。返回 null 表示合法，否则返回第一条问题。
    * 同时把 id 分配器校正到最大 id 之后。
    */
@@ -396,11 +396,14 @@ export class Blueprint {
       if (n.kind === 'free') { const w = this.checkNodePos(n.x, n.y); if (w) return w; }
       else if (n.kind !== 'anchor' && n.kind !== 'core') return '节点类型无效';
     }
-    for (const [x, y] of CFG.anchors) { const n = this.nodeAt(x, y); if (!n || n.kind !== 'anchor') return '缺少锚点'; }
-    const core = this.nodeAt(CFG.corePos[0], CFG.corePos[1]);
-    if (!core || core.kind !== 'core') return '缺少核心';
+    const M = this.map;
+    for (const [x, y] of M.anchors) { const n = this.nodeAt(x, y); if (!n || n.kind !== 'anchor') return '缺少锚点'; }
+    const core = this.coreNode();
+    if (!core) return '缺少核心';
+    const cw = this.checkCorePos(core.x, core.y);
+    if (cw) return cw === '这套规则下核心不能移动' ? '缺少核心' : cw;
     let fixed = 0; for (const n of this.nodes.values()) if (n.kind !== 'free') fixed++;
-    if (fixed !== CFG.anchors.length + 1) return '锚点或核心数量不对';
+    if (fixed !== M.anchors.length + 1) return '锚点或核心数量不对';
     const pairs = new Set();
     for (const bm of this.beams.values()) {
       if (!Number.isInteger(bm.id) || bm.id < 1 || ids.has(bm.id)) return '杆件 id 无效';
@@ -414,7 +417,7 @@ export class Blueprint {
       if (w) return w;
       if (this.rules.noOverlap && this._overlapping(a.x, a.y, b.x, b.y, new Set([bm.id]))) return '有杆件重叠';
     }
-    if (this.cannons.size > CFG.maxCannons) return '火炮太多';
+    if (this.cannons.size > M.maxCannons) return '火炮太多';
     const mounts = new Set();
     for (const c of this.cannons.values()) {
       if (!Number.isInteger(c.id) || c.id < 1 || ids.has(c.id)) return '火炮 id 无效';
@@ -444,14 +447,16 @@ export class Blueprint {
 
   /**
    * 用紧凑描述搭一座堡垒（给预设堡垒和测试用）：
+   *   core:    [x, y]            —— 可选，核心放在哪（不写就是地图的默认位置）
    *   nodes:   { 名字: [x, y] }   —— 坐标恰好落在锚点 / 核心上的会自动复用
    *   beams:   [[名字A, 名字B, 材料], ...]
    *   cannons: [[名字A, 名字B, 射角度数], ...]
    * 任何一步不合法都抛错，保证预设数据不会悄悄坏掉。
    */
-  static build(spec, side = 'player', rules) {
-    const bp = new Blueprint(side, rules);
+  static build(spec, side = 'player', rules, map) {
+    const bp = new Blueprint(side, rules, map);
     const ids = {};
+    if (spec.core) { const r = bp.setCore(spec.core[0], spec.core[1]); if (!r.ok) throw new Error(`核心 (${spec.core}): ${r.reason}`); }
     for (const [name, [x, y]] of Object.entries(spec.nodes)) {
       const r = bp.addNode(x, y);
       if (!r.ok) throw new Error(`节点 ${name} (${x},${y}): ${r.reason}`);

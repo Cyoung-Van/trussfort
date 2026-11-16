@@ -11,7 +11,7 @@ const DEG = Math.PI / 180;
  *   end.kind: 'own' 被自家结构挡住 | 'enemyBeam' | 'enemyCore' | 'enemyCannon' | 'ground' | 'water' | 'far'
  */
 export function predictShot(bpSelf, cannon, bpOther, opts = {}) {
-  const S = CFG.shell, W = CFG.fieldW, g = CFG.gravity;
+  const S = CFG.shell, M = bpSelf.map, W = M.fieldW, g = CFG.gravity;
   const pose = bpSelf.cannonPose(cannon);
   const angle = opts.angle ?? cannon.angle;
   const x0 = pose.px + Math.cos(angle) * CANNON.barrelLen;
@@ -24,8 +24,8 @@ export function predictShot(bpSelf, cannon, bpOther, opts = {}) {
   const STRIDE = 4;
   let x = x0, y = y0;
   const pts = [[x, y]];
-  const own = segsOf(bpSelf, false, cannon.beam);
-  const other = bpOther ? segsOf(bpOther, true, -1) : [];
+  const own = segsOf(bpSelf, false, cannon.beam, W);
+  const other = bpOther ? segsOf(bpOther, true, -1, W) : [];
   const ownCore = bpSelf.coreNode();
   const otherCore = bpOther ? bpOther.coreNode() : null;
   const otherCannons = bpOther ? [...bpOther.cannons.values()].map(c => { const p = bpOther.cannonPose(c); return [W - p.px, p.py]; }) : [];
@@ -38,8 +38,8 @@ export function predictShot(bpSelf, cannon, bpOther, opts = {}) {
     x = x0 + vx * t;
     y = y0 + vy0 * t - 0.5 * g * t * t - 0.5 * g * h * t;
     // 判定顺序与模拟一致：水面 → 地面 → 核心 → 火炮 → 杆件
-    if (y < CFG.waterY) return done('water');
-    if (y < 0 && (x < 0 || x > W)) return done('ground');
+    if (y < M.waterY) return done('water');
+    if (y < M.gMax && y < M.groundIn(x)) return done('ground');
     if (x < -40 || x > W + 40) return done('far');
     if (ownCore && Math.hypot(x - ownCore.x, y - ownCore.y) < rCore) return done('own');
     if (otherCore && Math.hypot(x - (W - otherCore.x), y - otherCore.y) < rCore) return done('enemyCore');
@@ -55,8 +55,7 @@ export function predictShot(bpSelf, cannon, bpOther, opts = {}) {
   return done('far');
 }
 
-function segsOf(bp, mirror, mountBeamId) {
-  const W = CFG.fieldW;
+function segsOf(bp, mirror, mountBeamId, W) {
   const out = [];
   for (const bm of bp.beams.values()) {
     const a = bp.nodes.get(bm.a), b = bp.nodes.get(bm.b);

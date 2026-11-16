@@ -111,9 +111,124 @@ body { font-family: var(--font); color: var(--ink); -webkit-font-smoothing: anti
 .brand-cn { font-size: 28px; font-weight: 700; letter-spacing: 0.06em; }
 .brand-en { margin-top: 6px; font-size: 10px; font-weight: 600; letter-spacing: 0.42em; opacity: 0.72; }
 
+/* ------------------------------------------------------------ 蓝图：地图 / 对手 / 轮到谁搭 */
+.setup {
+  position: absolute; left: 22px; top: 74px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  max-width: calc(50vw - 190px);
+}
+.setup-chip, .seat-seg {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 12px 0 10px;
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: var(--shadow), inset 0 0 0 1px var(--line);
+  font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap;
+}
+.setup-chip .ic { width: 17px; height: 17px; color: var(--ink-soft); }
+.setup-chip:hover { background: #fff; }
+.setup-chip:hover .ic { color: var(--ink); }
+.sc-k { font-weight: 500; color: var(--ink-soft); }
+.sc-text { max-width: 9em; overflow: hidden; text-overflow: ellipsis; }
+.seat-seg { display: none; padding: 0 4px 0 12px; gap: 4px; }
+.seat-seg.on { display: inline-flex; }
+.seat-seg .sc-k { margin-right: 4px; }
+.seat-opt { height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
+.seat-opt:hover { background: var(--ink-wash); color: var(--ink); }
+.seat-opt.on { background: var(--player); color: #fff; }
+.seat-opt.on.p2 { background: var(--enemy); }
+
+/* 地图 / 对手面板：外框和回放列表同款（.arena / .arena-card） */
+.setup-card { width: 720px; }
+.setup-body { padding: 14px 16px 6px; }
+.setup-foot { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px 16px; }
+.setup-foot:empty { display: none; }
+.setup-act {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 36px; padding: 0 14px 0 11px; border-radius: 11px;
+  background: var(--ink-wash); font-size: 13.5px; font-weight: 600;
+}
+.setup-act .ic { width: 17px; height: 17px; color: var(--ink-soft); }
+.setup-act:hover { background: var(--accent-wash); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.map-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(208px, 1fr)); gap: 12px; }
+.map-cell { position: relative; border-radius: 14px; background: var(--ink-wash); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+.map-cell.sel { box-shadow: inset 0 0 0 2px var(--player); }
+.map-pick { display: block; width: 100%; padding: 0 0 10px; text-align: left; }
+.map-pick:hover { background: var(--accent-wash); }
+.map-pick:active { transform: none; }
+.map-thumb { display: block; width: 100%; height: 100px; }
+.map-row { display: flex; align-items: center; gap: 6px; padding: 9px 12px 0; }
+.map-name { font-size: 15px; font-weight: 700; letter-spacing: 0.04em; }
+.map-on { color: var(--player); }
+.map-on .ic { width: 16px; height: 16px; stroke-width: 2.4; }
+.map-meta { padding: 3px 12px 0; font-size: 12px; font-weight: 500; line-height: 1.45; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.map-tools { position: absolute; right: 6px; top: 6px; display: flex; gap: 2px; padding: 2px; border-radius: 10px; background: rgba(255, 255, 255, 0.92); opacity: 0; transition: opacity var(--t) ease-out; }
+.map-cell:hover .map-tools, .map-tools:focus-within { opacity: 1; }
+.map-tools .icon-btn.sm { color: var(--ink); }
+.map-tools .icon-btn.armed { color: #fff; background: var(--bad); }
+@media (hover: none) { .map-tools { opacity: 1; } }
+.rival-list { display: flex; flex-direction: column; gap: 6px; }
+.rival-opt {
+  display: grid; grid-template-columns: 22px 1fr; align-items: center; gap: 10px;
+  width: 100%; padding: 11px 14px 11px 12px; border-radius: 12px; text-align: left;
+  background: var(--ink-wash);
+}
+.rival-opt:hover:not(:disabled) { background: var(--accent-wash); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.rival-opt.sel { box-shadow: inset 0 0 0 2px var(--player); }
+.rival-opt:active { transform: scale(0.995); }
+.ro-dot { width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--line); display: flex; align-items: center; justify-content: center; color: #fff; }
+.rival-opt.sel .ro-dot { background: var(--player); box-shadow: none; }
+.ro-dot .ic { width: 14px; height: 14px; stroke-width: 2.6; }
+.ro-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ro-name { font-size: 15px; font-weight: 700; }
+.ro-desc { font-size: 12.5px; font-weight: 500; line-height: 1.45; color: var(--ink-soft); }
+.rival-check { display: flex; align-items: center; gap: 9px; margin: 12px 4px 4px; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+.rival-check input { width: 17px; height: 17px; margin: 0; accent-color: var(--player); }
+
+/* ------------------------------------------------------------ 地图编辑器 */
+.hud.mode-mapedit .layer-bp, .hud.mode-mapedit .layer-shared { opacity: 0; visibility: hidden; }
+.hud.mode-mapedit .layer-bp .pe, .hud.mode-mapedit .layer-shared .pe { pointer-events: none !important; }
+.mapedit {
+  position: absolute; left: 22px; top: 18px; z-index: 6;
+  width: 272px; padding: 16px 16px 14px;
+  display: none; flex-direction: column; gap: 9px;
+  max-height: calc(100vh - 36px); overflow-y: auto;
+}
+.mapedit.on { display: flex; animation: pop-in 140ms ease-out; }
+.me-title { font-size: 18px; font-weight: 700; letter-spacing: 0.08em; margin-bottom: 2px; }
+.me-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; font-weight: 600; }
+.me-k { font-size: 13px; font-weight: 600; color: var(--ink-soft); }
+.me-gap { margin-top: 4px; }
+.me-check { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-soft); cursor: pointer; }
+.me-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--player); }
+.me-in {
+  width: 116px; height: 32px; padding: 0 9px;
+  border: 0; border-radius: 9px; outline: none;
+  background: var(--ink-wash); box-shadow: inset 0 0 0 1px var(--line);
+  font: 600 13.5px/1 var(--font); color: var(--ink); font-variant-numeric: tabular-nums;
+  -webkit-user-select: text; user-select: text;
+}
+.me-in:focus { background: #fff; box-shadow: inset 0 0 0 2px var(--player); }
+.me-in:disabled { opacity: 0.4; }
+.me-in[type="number"] { width: 88px; }
+.me-tools { display: flex; padding: 3px; border-radius: 11px; background: var(--ink-wash); }
+.me-tool { flex: 1 1 0; height: 30px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--ink-soft); }
+.me-tool:hover { color: var(--ink); }
+.me-tool.sel { background: #fff; color: var(--ink); box-shadow: 0 1px 4px rgba(10, 30, 60, 0.16); }
+.me-tip { min-height: 4.4em; font-size: 12.5px; font-weight: 500; line-height: 1.5; color: var(--ink-soft); }
+.me-status { padding: 8px 10px; border-radius: 9px; font-size: 12.5px; font-weight: 600; line-height: 1.45; color: #17794a; background: rgba(47, 191, 113, 0.14); }
+.me-status.bad { color: #b5282d; background: var(--bad-wash); }
+.me-btns { display: flex; gap: 8px; margin-top: 2px; }
+.me-cancel, .me-save { height: 40px; border-radius: 12px; font-size: 14px; font-weight: 700; }
+.me-cancel { flex: 0 0 76px; background: var(--ink-wash); }
+.me-cancel:hover { background: var(--ink-wash-2); }
+.me-save { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--go); color: #fff; }
+.me-save:hover:not(:disabled) { background: var(--go-dark); }
+.me-save .ic { width: 17px; height: 17px; stroke-width: 2.4; }
+
 /* 上一战标记 */
 .report-chip {
-  position: absolute; left: 22px; top: 76px;
+  position: absolute; left: 22px; top: 116px;
   display: none; align-items: center; gap: 7px;
   height: 30px; padding: 0 12px 0 10px;
   border-radius: 999px;
@@ -633,7 +748,10 @@ body { font-family: var(--font); color: var(--ink); -webkit-font-smoothing: anti
   .brand { left: 18px; top: 22px; }
   .brand-cn { font-size: 22px; }
   .brand-en { display: none; }
-  .report-chip { left: 16px; top: 62px; }
+  .setup { left: 16px; top: 58px; gap: 6px; max-width: calc(50vw - 136px); }
+  .setup-chip, .seat-seg { height: 30px; font-size: 12.5px; }
+  .setup-chip .sc-k { display: none; }
+  .report-chip { left: 16px; top: 134px; }
   .budget { width: 236px; margin-left: -118px; padding: 9px 13px 11px; }
   .bud-spent { font-size: 26px; }
   .topright { right: 14px; gap: 6px; }
@@ -659,9 +777,11 @@ body { font-family: var(--font); color: var(--ink); -webkit-font-smoothing: anti
   .topright .icon-btn, .seg { height: 38px; }
   .seg-opt { height: 30px; padding: 0 8px; font-size: 12.5px; }
   .budget { left: 0; right: 0; top: 58px; margin: 0 auto; width: min(320px, calc(100vw - 24px)); }
-  .report-chip { left: 12px; top: 148px; }
+  .setup { left: 12px; right: 12px; top: 146px; max-width: none; }
+  .report-chip { left: 12px; top: 184px; }
+  .mapedit { left: 10px; right: 10px; top: 10px; width: auto; max-height: 46vh; }
   .hint {
-    left: 12px; right: 12px; top: 186px; transform: none; max-width: none;
+    left: 12px; right: 12px; top: 222px; transform: none; max-width: none;
     height: auto; padding: 8px 6px 8px 14px; border-radius: 14px; white-space: normal; line-height: 1.4;
   }
   .help-card { right: 10px; top: 56px; width: min(300px, calc(100vw - 20px)); }

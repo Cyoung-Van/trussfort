@@ -21,6 +21,14 @@ export const ICON = {
   close: svg('<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>'),
   arena: svg('<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 5.5H5a3 3 0 0 0 3.2 3.9M16 5.5h3a3 3 0 0 1-3.2 3.9"/><path d="M12 13v4M8.5 20h7M9.5 17h5"/>'),
   chev: svg('<path d="M9 6l6 6-6 6"/>'),
+  map: svg('<path d="M3 17.5l4.5-6 3.5 3.5 4-7 6 9.5"/><path d="M3 20.5h18"/>'),
+  versus: svg('<circle cx="7.5" cy="8.5" r="3"/><circle cx="16.5" cy="8.5" r="3"/><path d="M2.5 19.5a5 5 0 0 1 10 0M11.5 19.5a5 5 0 0 1 10 0"/>'),
+  plus: svg('<path d="M12 5v14M5 12h14"/>'),
+  edit: svg('<path d="M4 20h4l10.5-10.5-4-4L4 16z"/><path d="M13 7l4 4"/>'),
+  copy: svg('<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/>'),
+  download: svg('<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M5 19.5h14"/>'),
+  upload: svg('<path d="M12 15V4M7.5 8.5L12 4l4.5 4.5"/><path d="M5 19.5h14"/>'),
+  check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
   field: svg('<path d="M3 18h6l1.5-4h3L15 18h6"/><path d="M3 18V8M21 18V8"/>'),
 };
 

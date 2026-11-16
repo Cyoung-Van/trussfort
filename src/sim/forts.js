@@ -1,13 +1,13 @@
 // 预设堡垒。都用己方本地坐标书写（朝 +x 开火），敌方进入世界时自动镜像。
 // 锚点：(-6,0) (-3,0) (0,0) (0,-2) (0,-4)；核心固定在 (4,3)。对方核心在本地坐标 (fieldW-4, 3)。
 
-import { CFG } from '../config.js';
 import { Blueprint } from './blueprint.js';
 import { solveAngle } from './ballistics.js';
+import { getMap } from '../map.js';
 
-const DEG = Math.PI / 180;
-// 对方核心在本地坐标里的位置
-const FOE_CORE = [CFG.fieldW - CFG.corePos[0], CFG.corePos[1]];
+// 这三座预设堡垒都是为「海峡」这张图搭的
+const STRAIT = getMap('strait');
+const FIELD_W = STRAIT.fieldW;
 
 /**
  * 搭好堡垒后给火炮定射角。cannons 的第三项可以是：
@@ -15,13 +15,15 @@ const FOE_CORE = [CFG.fieldW - CFG.corePos[0], CFG.corePos[1]];
  *   { at: [x, y], high: bool } —— 瞄准本地坐标里的某一点；high=true 用高抛弹道
  *   { core: true, high, dx, dy } —— 瞄准对方核心（可带偏移）
  */
-export function buildFort(spec, side) {
+export function buildFort(spec, side, map = STRAIT) {
+  const M = getMap(map);
   const plain = { ...spec, cannons: (spec.cannons || []).map(([a, b, aim]) => [a, b, typeof aim === 'number' ? aim : 45]) };
-  const bp = Blueprint.build(plain, side);
+  const bp = Blueprint.build(plain, side, undefined, M);
   const cannons = [...bp.cannons.values()];
   (spec.cannons || []).forEach(([, , aim], i) => {
     if (typeof aim === 'number') return;
-    const t = aim.at || [FOE_CORE[0] + (aim.dx || 0), FOE_CORE[1] + (aim.dy || 0)];
+    // 「瞄准对方核心」指的是对方核心的默认位置
+    const t = aim.at || [M.foeCore[0] + (aim.dx || 0), M.foeCore[1] + (aim.dy || 0)];
     const pose = bp.cannonPose(cannons[i]);
     const ang = solveAngle(pose.px, pose.py, t[0], t[1], !!aim.high);
     if (ang == null) throw new Error(`火炮 ${i}: 打不到目标 (${t})`);
@@ -139,12 +141,38 @@ export const REFERENCE_SPEC = {
   cannons: [
     ['P1', 'P2', { core: true, high: true }],
     // 对方塔顶炮的炮耳轴在对方本地 (3, 9.5)，镜像到己方本地是 (fieldW - 3, 9.5)
-    ['P2', 'P3', { at: [CFG.fieldW - 3, 9.5], high: true }],
+    ['P2', 'P3', { at: [FIELD_W - 3, 9.5], high: true }],
     // 对方甲板前端斜撑 U4-D6 的中点在对方本地 (5, -1)
-    ['U4', 'D6', { at: [CFG.fieldW - 5, -1], high: false }],
+    ['U4', 'D6', { at: [FIELD_W - 5, -1], high: false }],
   ],
 };
 
 export function makeEnemyFort() { return buildFort(ENEMY_SPEC, 'enemy'); }
 export function makeStarterFort() { return buildFort(STARTER_SPEC, 'player'); }
 export function makeReferenceFort(side = 'player') { return buildFort(REFERENCE_SPEC, side); }
+
+// ---- 各张地图的预设 ----
+import { MAPS } from '../map.js';
+import { hasMapPreset, mapPreset } from './forts-maps.js';
+
+/**
+ * 某张地图的预设堡垒。kind: 'garrison'（默认对手）| 'starter'（起手）| 'reference'（参考答案，只有海峡有）。
+ * 自定义地图没有预设，返回 null。map 可以是地图名字或编译好的地图。
+ */
+export function presetFort(map, kind, side = 'player') {
+  const M = getMap(map);
+  if (M.raw === MAPS.strait) {
+    if (kind === 'garrison') return buildFort(ENEMY_SPEC, side);
+    if (kind === 'starter') return buildFort(STARTER_SPEC, side);
+    if (kind === 'reference') return buildFort(REFERENCE_SPEC, side);
+    return null;
+  }
+  for (const id of Object.keys(MAPS)) if (M.raw === MAPS[id]) return mapPreset(id, kind, side);
+  return null;
+}
+export function hasPreset(map, kind) {
+  const M = getMap(map);
+  if (M.raw === MAPS.strait) return kind === 'garrison' || kind === 'starter' || kind === 'reference';
+  for (const id of Object.keys(MAPS)) if (M.raw === MAPS[id]) return hasMapPreset(id, kind);
+  return false;
+}

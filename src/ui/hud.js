@@ -129,6 +129,8 @@ export class Hud {
     const brand = el('div', 'brand', L);
     el('div', 'brand-cn', brand, '桁垒');
     el('div', 'brand-en', brand, 'TRUSSFORT');
+    // 字标下面：地图和对手（内容由 ui/setup.js 填）
+    this.setupBox = el('div', 'setup pe', L);
     this.reportChip = this._button(L, 'chip report-chip pe', () => {
       this._call('report');
       this.setReport(null);
@@ -146,7 +148,7 @@ export class Hud {
     this.budStatus = el('span', 'bud-status', r1, '');
     const r2 = el('div', 'bud-num', bud);
     this.budSpent = el('span', 'bud-spent', r2, money(0));
-    el('span', 'bud-max', r2, '/ ' + money(CFG.budget));
+    this.budMax = el('span', 'bud-max', r2, '/ ' + money(CFG.budget));
     this.deltaBox = el('span', 'bud-deltas', r2);
     const bar = el('div', 'bud-bar', bud);
     this.budFill = el('div', 'bud-fill', bar);
@@ -199,6 +201,7 @@ export class Hud {
       toolBtn(m, SWATCH[m], mat.name, `$${mat.cost}/m`, String(MATERIAL_ORDER.indexOf(m) + 1));
     }
     const cb = toolBtn('cannon', ICON.cannon, '火炮', money(CANNON.cost), '5');
+    this._maxCannons = CFG.maxCannons;
     this.cannonCount = el('span', 'cnt', cb, `0/${CFG.maxCannons}`);
     el('span', 'tb-div', tb);
     toolBtn('move', ICON.move, '移动', '', 'V');
@@ -361,7 +364,7 @@ export class Hud {
    */
   setSpectate(spec) {
     this._spec = spec || null;
-    const names = spec ? spec.names : ['我方', '敌方'];
+    const names = spec ? spec.names : this._names || ['我方', '敌方'];
     for (let s = 0; s < 2; s++) { this.sides[s].name.textContent = names[s]; this.rsHead[s].textContent = names[s]; }
     this.root.classList.toggle('spectate', !!spec);
     const back = spec ? '返回列表' : '返回蓝图';
@@ -455,6 +458,23 @@ export class Hud {
     }
   }
 
+  /** 换地图后更新上限：预算和火炮数量 */
+  setLimits({ budget, maxCannons }) {
+    this._maxCannons = maxCannons;
+    this.budMax.textContent = '/ ' + money(budget);
+  }
+
+  /**
+   * 对决条和结算卡上双方的名字。传 null 恢复成「我方 / 敌方」（观战回放另有 setSpectate）。
+   * 给了名字时，结算标题写「某某 胜」而不是「胜利 / 失败」。
+   */
+  setNames(names) {
+    this._names = names || null;
+    if (this._spec) return;
+    const n = names || ['我方', '敌方'];
+    for (let s = 0; s < 2; s++) { this.sides[s].name.textContent = n[s]; this.rsHead[s].textContent = n[s]; }
+  }
+
   setBudget({ cost = 0, budget = CFG.budget, breakdown = null, delta = 0, silent = false } = {}) {
     this._budget = budget;
     const instant = silent || this._reduced || !this._budgetInit;
@@ -497,8 +517,8 @@ export class Hud {
       }
       this.popTotal.textContent = money(tot);
       const n = Math.round((breakdown.cannon || 0) / CANNON.cost);
-      this.cannonCount.textContent = `${n}/${CFG.maxCannons}`;
-      this.cannonCount.classList.toggle('full', n >= CFG.maxCannons);
+      this.cannonCount.textContent = `${n}/${this._maxCannons}`;
+      this.cannonCount.classList.toggle('full', n >= this._maxCannons);
       this.cannonCount.classList.toggle('zero', n === 0);
     }
   }
@@ -681,7 +701,7 @@ export class Hud {
   }
 
   showResult({ winner, reason, time = 0, stats = null, playerHp = 0, enemyHp = 0, hpMax = 0, note = '' } = {}) {
-    const names = this._spec ? this._spec.names : null;
+    const names = this._spec ? this._spec.names : this._names || null;
     const title = names
       ? (winner === 'player' ? `${names[0]} 胜` : winner === 'enemy' ? `${names[1]} 胜` : '平局')
       : (winner === 'player' ? '胜利' : winner === 'enemy' ? '失败' : '平局');
@@ -711,6 +731,7 @@ function reasonText(winner, reason, names) {
     // 平局时两个核心的失去方式可能不同（一毁一沉），所以用中性的说法
     case 'coreDestroyed': return both ? '双方核心同时失守' : `${loser}核心被击毁`;
     case 'coreSunk': return both ? '双方核心同时失守' : `${loser}核心坠入水中`;
+    case 'coreGrounded': return both ? '双方核心同时失守' : `${loser}核心坠地损毁`;
     case 'timeout': return '时间到，按核心剩余耐久判定';
     case 'stalemate': return '双方都已失去火力，按核心剩余耐久判定';
     default: return '';

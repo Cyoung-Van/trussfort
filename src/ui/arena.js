@@ -3,7 +3,7 @@
 
 import { ICON } from './icons.js';
 
-const REASON = { coreDestroyed: '核心被毁', coreSunk: '核心落水', timeout: '到时判定', stalemate: '双方失去火力' };
+const REASON = { coreDestroyed: '核心被毁', coreSunk: '核心落水', coreGrounded: '核心坠地', timeout: '到时判定', stalemate: '双方失去火力' };
 
 /** 对决条和列表里用的短名：选手 id 首字母大写（hydrogen → Hydrogen） */
 export const shortName = (p) => (p && p.id ? p.id.charAt(0).toUpperCase() + p.id.slice(1) : '?');

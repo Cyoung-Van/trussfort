@@ -4,6 +4,7 @@
   {
    "id": "2026-11-16-hydrogen-vs-astra",
    "rules": "v1",
+   "map": "strait",
    "date": "2026-11-16",
    "players": [
     {
@@ -203,6 +204,7 @@
   {
    "id": "2026-11-15-hydrogen-vs-terra",
    "rules": "v1",
+   "map": "strait",
    "date": "2026-11-15",
    "players": [
     {

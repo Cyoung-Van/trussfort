@@ -6,10 +6,11 @@
 //
 // 确定性：固定步长、固定遍历顺序、带种子的随机数。同一对蓝图 + 同一个种子，结果逐位相同。
 
-import { CFG, MATERIALS, CANNON, CORE, worldX, worldAngle } from '../config.js';
+import { CFG, MATERIALS, CANNON, CORE } from '../config.js';
 import { cannonPoseFrom } from './blueprint.js';
 import { makeRng } from './rng.js';
 import { getRules } from '../rules.js';
+import { getMap } from '../map.js';
 
 const DEG = Math.PI / 180;
 
@@ -20,11 +21,13 @@ export class Sim {
   /**
    * @param {Blueprint} bpPlayer 左侧（玩家）蓝图
    * @param {Blueprint} bpEnemy  右侧（敌方）蓝图，本地坐标，这里做镜像
-   * @param {{seed?:number, peace?:boolean, rules?:string|object}} opts peace=true 时永不开火、不判胜负（只看结构受力）；
-   *   rules 是规则版本（见 rules.js），不传就用左侧蓝图自带的版本
+   * @param {{seed?:number, peace?:boolean, rules?:string|object, map?:string|object}} opts peace=true 时永不开火、不判胜负（只看结构受力）；
+   *   rules 是规则版本（见 rules.js），不传就用左侧蓝图自带的版本；map 是地图（见 map.js），不传就用左侧蓝图所在的地图
    */
   constructor(bpPlayer, bpEnemy, opts = {}) {
     this.R = opts.rules ? getRules(opts.rules) : bpPlayer.rules || getRules();
+    this.M = opts.map ? getMap(opts.map) : bpPlayer.map || getMap();
+    this._hit = { x: 0, y: 0, c: 0 };   // 地形碰撞的临时结果
     this.seed = opts.seed ?? 20261115;
     this.peace = !!opts.peace;
     this.rng = makeRng(this.seed);
@@ -34,7 +37,7 @@ export class Sim {
     this.fightTime = 0;    // 交火阶段已进行的时间
     this.phase = 'settle'; // 'settle' → 'fight' → 'ended'
     this.winner = null;    // 'player' | 'enemy' | 'draw'
-    this.endReason = null; // 'coreDestroyed' | 'coreSunk' | 'timeout' | 'stalemate'
+    this.endReason = null; // 'coreDestroyed' | 'coreSunk' | 'coreGrounded' | 'timeout' | 'stalemate'
     this.endTime = 0;
     this.events = [];      // 由外部每帧取走并清空
     this.stats = [
@@ -65,7 +68,7 @@ export class Sim {
     this.fixed = new Uint8Array(n);
     this.side = new Uint8Array(n);
     this.wet = new Uint8Array(n);
-    this.contact = new Uint8Array(n);  // 0 无接触, 1 顶面 / 海床, 2 崖壁
+    this.contact = new Uint8Array(n);  // 0 无接触, 1 水平地面, 2 竖直崖壁, 3 + 段号 = 斜坡（见 map.js 的 pushOut）
     this.nodeBpId = new Int32Array(n);
     // 上一帧的位置快照：画面可在两帧之间插值（慢动作、高刷新率屏幕）
     this.ox = new Float64Array(n); this.oy = new Float64Array(n);
@@ -86,7 +89,7 @@ export class Sim {
     // 打出来的结果都一样（玩家拆了重搭同一根杆，不该换一个结局）。
     const nodes = [...bp.nodes.values()].sort((p, q) => p.x - q.x || p.y - q.y);
     for (const nd of nodes) {
-      this.x[i] = this.px[i] = worldX(side, nd.x);
+      this.x[i] = this.px[i] = this.M.worldX(side, nd.x);
       this.y[i] = this.py[i] = nd.y;
       this.fixed[i] = nd.kind === 'anchor' ? 1 : 0;
       this.alive[i] = 1;
@@ -95,7 +98,7 @@ export class Sim {
       this.nodeBeams[i] = [];
       map.set(nd.id, i);
       if (nd.kind === 'core') {
-        this.cores[side] = { side, node: i, hp: CORE.hp, hpMax: CORE.hp, alive: true, sunk: false, lastHit: -10 };
+        this.cores[side] = { side, node: i, hp: CORE.hp, hpMax: CORE.hp, alive: true, sunk: false, grounded: false, touched: false, lastHit: -10 };
       }
       i++;
     }
@@ -131,7 +134,7 @@ export class Sim {
     for (const c of cannonList) {
       const bi = beamIdx.get(c.beam);
       const b = this.beams[bi];
-      const pose = cannonPoseFrom(this.x[b.a], this.y[b.a], this.x[b.b], this.y[b.b], worldAngle(side, c.angle));
+      const pose = cannonPoseFrom(this.x[b.a], this.y[b.a], this.x[b.b], this.y[b.b], side === 1 ? Math.PI - c.angle : c.angle);
       this.cannons.push({
         idx: this.cannons.length, bpId: c.id, side, beam: bi,
         rel: pose.rel, up: pose.up, designAngle: pose.angle,
@@ -210,7 +213,7 @@ export class Sim {
     const x = this.x, y = this.y, px = this.px, py = this.py, vx = this.vx, vy = this.vy;
     const w = this.w, alive = this.alive, n = this.n;
     const beams = this.beams, nb = beams.length;
-    const W = CFG.fieldW, waterY = CFG.waterY;
+    const M = this.M, waterY = M.waterY, killY = M.killY, gMax = M.gMax, hit = this._hit;
     const g = CFG.gravity * this._gscale;
     const damp = Math.exp(-this._damp * h);
     const wdamp = Math.exp(-CFG.waterDrag * h);
@@ -249,23 +252,24 @@ export class Sim {
       b.lam = dl; b.slack = false;
     }
 
-    // 3) 地形碰撞
+    // 3) 地形碰撞：陷进地里的节点推回最近的地表（地形来自地图，见 map.js）
     const contact = this.contact;
-    const seabed = CFG.seabedY;
     for (let i = 0; i < n; i++) {
       if (!alive[i] || w[i] === 0) continue;
       let c = 0;
       const yi = y[i];
-      if (yi < 0) {
-        const xi = x[i];
-        if (xi < 0) { if (-yi <= -xi) { y[i] = 0; c = 1; } else { x[i] = 0; c = 2; } }
-        else if (xi > W) { if (-yi <= xi - W) { y[i] = 0; c = 1; } else { x[i] = W; c = 2; } }
-        if (y[i] < seabed) { y[i] = seabed; c = 1; }
+      if (yi < gMax && yi < M.groundIn(x[i])) {
+        M.pushOut(x[i], yi, hit);
+        x[i] = hit.x; y[i] = hit.y; c = hit.c;
       }
       contact[i] = c;
     }
+    // 核心有没有碰过地面要记下来：contact 每个子步都重写，帧末再看就漏掉了中途擦到又弹开的情况
+    const c0 = this.cores[0], c1 = this.cores[1];
+    if (c0 && contact[c0.node] !== 0) c0.touched = true;
+    if (c1 && contact[c1.node] !== 0) c1.touched = true;
     if ((this._sub & 1) === 0) {
-      // 杆件中点也不许陷进山体（搭在崖角上的残骸）
+      // 杆件中点也不许陷进地里（搭在崖角、坡顶上的残骸）
       for (let k = 0; k < nb; k++) {
         const b = beams[k];
         if (!b.alive) continue;
@@ -273,12 +277,11 @@ export class Sim {
         if (w[i] + w[j] === 0) continue;
         b.touch = false;
         const my = (y[i] + y[j]) * 0.5;
-        if (my >= 0) continue;
+        if (my >= gMax) continue;
         const mx = (x[i] + x[j]) * 0.5;
-        let dx = 0, dy = 0;
-        if (mx < 0) { if (-my <= -mx) dy = -my; else dx = -mx; }
-        else if (mx > W) { if (-my <= mx - W) dy = -my; else dx = W - mx; }
-        else continue;
+        if (my >= M.groundIn(mx)) continue;
+        M.pushOut(mx, my, hit);
+        const dx = hit.x - mx, dy = hit.y - my;
         b.touch = true;
         if (w[i] > 0) { x[i] += dx; y[i] += dy; }
         if (w[j] > 0) { x[j] += dx; y[j] += dy; }
@@ -291,7 +294,15 @@ export class Sim {
     for (let i = 0; i < n; i++) {
       if (!alive[i] || w[i] === 0) continue;
       let vxi = (x[i] - px[i]) * invH, vyi = (y[i] - py[i]) * invH;
-      if (contact[i] === 1) vxi *= fr; else if (contact[i] === 2) vyi *= frWall;
+      const ci = contact[i];
+      if (ci === 1) vxi *= fr; else if (ci === 2) vyi *= frWall;
+      else if (ci > 2) {
+        // 斜坡：只衰减沿坡面的那部分速度
+        const sg = M.segs[ci - 3];
+        const vt = vxi * sg.tx + vyi * sg.ty;
+        const k = (sg.walk ? fr : frWall) - 1;
+        vxi += vt * k * sg.tx; vyi += vt * k * sg.ty;
+      }
       vx[i] = vxi; vy[i] = vyi;
       if (y[i] < waterY) {
         if (!this.wet[i]) {
@@ -301,7 +312,7 @@ export class Sim {
             this.events.push({ type: 'splash', x: x[i], y: waterY, power: p < 0.15 ? 0.15 : p > 1 ? 1 : p, side: this.side[i] });
           }
         }
-        if (y[i] < CFG.killY) this._killNode(i);
+        if (y[i] < killY) this._killNode(i);
       }
     }
 
@@ -403,12 +414,12 @@ export class Sim {
     if (b.alive) { this._refreshAround(b.a); this._refreshAround(b.b); }
   }
 
-  _destroyCore(core) {
+  _destroyCore(core, cause = 'fire') {
     if (!core.alive) return;
     core.alive = false; core.hp = 0;
     const i = core.node;
     const cx = this.x[i], cy = this.y[i];
-    this.events.push({ type: 'coreDestroyed', side: core.side, x: cx, y: cy });
+    this.events.push({ type: 'coreDestroyed', side: core.side, x: cx, y: cy, cause });
     // 核心殉爆：重创周围结构
     this._blast(cx, cy, null, 220, 4.2, CFG.shell.impulse * 2.2, 5.0, null, null, this.R.blastOcclusion);
     this._refreshAround(i);
@@ -519,7 +530,7 @@ export class Sim {
       if (!c.alive) continue;
       this._poseCannon(c);
       if (c.recoil > 0) c.recoil = Math.max(0, c.recoil - dt * 2.4);
-      if (c.py < CFG.waterY) { this._killCannon(c, 'sunk'); continue; }
+      if (c.py < this.M.waterY) { this._killCannon(c, 'sunk'); continue; }
       if (!this.R.groundMounts) {
         const mb = this.beams[c.beam];
         // 炮座的任一端，或者杆件中段（悬在崖边、搭在崖角上的情况）碰着地形，都算贴地
@@ -569,7 +580,7 @@ export class Sim {
   }
 
   _stepShells(h) {
-    const S = CFG.shell, g = CFG.gravity, W = CFG.fieldW;
+    const S = CFG.shell, g = CFG.gravity, M = this.M, W = M.fieldW, waterY = M.waterY, gMax = M.gMax;
     const x = this.x, y = this.y;
     const beams = this.beams;
     let anyDead = false;
@@ -579,12 +590,12 @@ export class Sim {
       s.vy -= g * h;
       s.x += s.vx * h; s.y += s.vy * h;
       s.age += h;
-      if (s.y < CFG.waterY) {
+      if (s.y < waterY) {
         s.alive = false;
-        this.events.push({ type: 'splash', x: s.x, y: CFG.waterY, power: 0.75, shell: true, side: s.side, cannon: s.cannon });
+        this.events.push({ type: 'splash', x: s.x, y: waterY, power: 0.75, shell: true, side: s.side, cannon: s.cannon });
         continue;
       }
-      if (s.y < 0 && (s.x < 0 || s.x > W)) { this._explode(s, null, null, null, 'ground'); continue; }
+      if (s.y < gMax && s.y < M.groundIn(s.x)) { this._explode(s, null, null, null, 'ground'); continue; }
       if (s.x < -60 || s.x > W + 60 || s.y > 150) { s.alive = false; continue; }
 
       let done = false;
@@ -693,19 +704,25 @@ export class Sim {
     }
     if (this.peace) return;
 
+    const waterY = this.M.waterY;
     for (const core of this.cores) {
       if (!core || !core.alive) continue;
-      if (this.y[core.node] < CFG.waterY - 0.4) {
+      if (this.y[core.node] < waterY - 0.4) {
         core.alive = false; core.sunk = true;
-        this.events.push({ type: 'coreSunk', side: core.side, x: this.x[core.node], y: CFG.waterY });
+        this.events.push({ type: 'coreSunk', side: core.side, x: this.x[core.node], y: waterY });
         this._refreshAround(core.node);
+      } else if (this.R.coreGroundKill && this.phase !== 'ended' && core.touched) {
+        // 核心碰到地面就毁：它得靠结构托在半空（胜负已分之后不再追加）
+        core.grounded = true;
+        this._destroyCore(core, 'ground');
       }
     }
     if (this.phase === 'ended') return;
 
     const p = this.cores[0], e = this.cores[1];
     if (!p.alive || !e.alive) {
-      const reason = (!p.alive && p.sunk) || (!e.alive && e.sunk) ? 'coreSunk' : 'coreDestroyed';
+      const dead = [p, e].filter((c) => !c.alive);
+      const reason = dead.some((c) => c.sunk) ? 'coreSunk' : dead.some((c) => c.grounded) ? 'coreGrounded' : 'coreDestroyed';
       this._end(!p.alive && !e.alive ? 'draw' : !p.alive ? 'enemy' : 'player', reason);
       return;
     }

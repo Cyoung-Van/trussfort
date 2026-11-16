@@ -6,7 +6,7 @@ import * as THREE from 'three';
 
 // ---- 粒子标志位 ----
 export const F = {
-  GROUND: 1,      // 落到崖顶 (y=0, x<0 或 x>fieldW) 上会弹一下然后停住
+  GROUND: 1,      // 落到地面（高度由 env.groundAt(x) 给）上会弹一下然后停住
   DIE_WATER: 2,   // 下落入水即消失（水滴）
   SINK: 4,        // 入水后减速下沉并缩小消失（碎屑）
   SPLASH: 8,      // 入水时溅一朵小水花（配合 SINK）
@@ -115,7 +115,7 @@ export class ParticlePool {
   }
 
   /**
-   * env: { fieldW, waterY, waterAt(x), miniSplash(x, y), pop(x, y) }
+   * env: { fieldW, waterY, waterAt(x), groundAt(x), miniSplash(x, y), pop(x, y) }
    */
   update(dt, env) {
     const d = this.d;
@@ -148,10 +148,10 @@ export class ParticlePool {
         d[o + RX] += d[o + WX] * dt; d[o + RY] += d[o + WY] * dt; d[o + RZ] += d[o + WZ] * dt;
 
         // 落在崖顶
-        if ((flags & F.GROUND) && d[o + STATE] === 0 && (px < 0 || px > fieldW)) {
-          const rad = 0.03;
-          if (py < rad && prevY >= -0.05) {
-            py = rad;
+        if ((flags & F.GROUND) && d[o + STATE] === 0) {
+          const rad = 0.03, gy = env.groundAt(px);
+          if (py < gy + rad && prevY >= gy - 0.05) {
+            py = gy + rad;
             if (vy < -1.4) {
               vy = -vy * 0.32; vx *= 0.55; vz *= 0.55;
               d[o + WX] *= 0.5; d[o + WY] *= 0.5; d[o + WZ] *= 0.5;

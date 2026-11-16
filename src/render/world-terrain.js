@@ -39,6 +39,7 @@ const C = {
 };
 C.under = shade(C.rockWet, 0.82);      // 水下岩体：rockWet 压暗
 C.treeDark = shade(C.tree, 0.84);      // 树冠下层：tree 压暗
+export { C as TERRAIN_COLORS };
 
 // ------------------------------------------------------------------ 剖面
 function sliceProfile(side, j) {
@@ -203,10 +204,12 @@ const _q = new THREE.Quaternion();
 const _e = new THREE.Euler();
 const _s = new THREE.Vector3();
 const _p = new THREE.Vector3();
-function mat(x, y, z, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) {
+export function placeMatrix(x, y, z, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) {
   _q.setFromEuler(_e.set(rx, ry, rz));
   return _m.compose(_p.set(x, y, z), _q, _s.set(sx, sy, sz));
 }
+
+const mat = placeMatrix;
 
 function emitFootings(b) {
   const W = CFG.fieldW;
@@ -258,7 +261,7 @@ const ROCKS = [
 ];
 export const FLAG_S = -9.6, FLAG_Z = -3.0, POLE_H = 6.2;
 
-function emitTree(b, x, y, z, sc, seed) {
+export function emitTree(b, x, y, z, sc, seed) {
   const ry = hash(seed, 1) * Math.PI * 2;
   const trunk = new THREE.CylinderGeometry(0.11, 0.17, 1.0, 5);
   b.addGeometry(trunk, mat(x, y + 0.5 * sc - 0.2, z, 0, ry, 0, sc, sc, sc), C.trunk, { vary: 0.05 });
@@ -273,7 +276,7 @@ function emitTree(b, x, y, z, sc, seed) {
   });
 }
 
-function emitRock(b, x, y, z, sc, seed) {
+export function emitRock(b, x, y, z, sc, seed) {
   const g = new THREE.IcosahedronGeometry(1, 0);
   const yTop = y + sc * 0.15;
   b.addGeometry(g, mat(x, y + sc * 0.25, z, 0, hash(seed, 2) * 6.28, 0, sc * 1.3, sc * 0.75, sc),
@@ -335,7 +338,9 @@ export function buildCliffsOnly() {
 
 // ------------------------------------------------------------------ 远景
 /** 三层雾中山岛：z -64 / -92 / -126，不投影 */
-export function buildBackdrop() {
+/** 远景山岛。base 是它们的脚所在的高度（有水的图是水面，没水的图是地面） */
+export function buildBackdrop(base = CFG.waterY) {
+  const WY = base;
   const b = new GeoBuilder();
   const layers = [
     { z: -64, depth: 9, color: mix(C.grassDark, C.tree, 0.5), hMin: 2.5, hMax: 7.5, step: 7, islands: [[-78, -40], [-14, 8], [36, 62], [86, 128]] },

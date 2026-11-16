@@ -16,7 +16,7 @@ for (const m of index.matches) {
     for (const r of m.rounds) {
       for (const g of r.games) {
         const fort = (i) => JSON.parse(fs.readFileSync(path.join(ARENA, m.id, r.forts[i]), 'utf8'));
-        const res = duel(fort(g.left), fort(1 - g.left), { seed: g.seed, rules: m.rules || 'v1' });
+        const res = duel(fort(g.left), fort(1 - g.left), { seed: g.seed, rules: m.rules || 'v1', map: m.map || 'strait' });
         const winner = res.winner === 'draw' ? null : res.winner === 'A' ? g.left : 1 - g.left;
         assert.equal(winner, g.winner, `第 ${r.round} 轮种子 ${g.seed} 左 ${g.left}：胜者`);
         assert.equal(res.reason, g.reason, `第 ${r.round} 轮种子 ${g.seed} 左 ${g.left}：原因`);

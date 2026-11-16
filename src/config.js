@@ -1,9 +1,11 @@
 // 桁垒 TRUSSFORT — 全局常量。
-// 坐标系：米，y 向上。左崖顶面 y=0、崖边 x=0；右崖崖边 x=fieldW。
+// 坐标系：米，y 向上。地形、锚点、建造范围、核心范围、预算由地图给出（map.js）。
 // 蓝图一律用「己方本地坐标」（像玩家一样朝 +x 开火），敌方在进入世界时做镜像 x' = fieldW - x。
 
 export const CFG = {
   // ---- 场地 ----
+  // 场地现在由地图决定（见 map.js）。下面这几项是「海峡」这张图的数值，只剩海峡的手调悬崖画面
+  // （render/world-terrain.js）和几处默认值还在读；模拟、蓝图校验、AI 接口都不再用它们。
   fieldW: 30,            // 两座悬崖崖边之间的水面宽度
   waterY: -6,            // 水面高度
   seabedY: -13,
@@ -103,6 +105,3 @@ export const CORE = {
 export const SIDE = { player: 0, enemy: 1 };
 export const SIDE_NAME = ['player', 'enemy'];
 
-// 本地坐标 → 世界坐标
-export function worldX(side, x) { return side === 1 || side === 'enemy' ? CFG.fieldW - x : x; }
-export function worldAngle(side, a) { return side === 1 || side === 'enemy' ? Math.PI - a : a; }
